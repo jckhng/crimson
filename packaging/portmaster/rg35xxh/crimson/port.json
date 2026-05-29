@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "name": "crimson",
+  "items": [
+    "crimson.sh",
+    "crimson/"
+  ],
+  "attr": {
+    "title": "Crimsonland (Zig)",
+    "desc": "Native Zig Crimsonland rewrite packaged for PortMaster handhelds.",
+    "inst": "Original game .paq files must be present in crimson/assets, then launch crimson.sh from PortMaster.",
+    "genres": [
+      "action",
+      "shooter"
+    ],
+    "porter": [
+      "local"
+    ],
+    "runtime": "blank",
+    "arch": [
+      "aarch64"
+    ]
+  }
+}

@@ -844,16 +844,18 @@ fn drawMenuBackdropAndSign(timeline_ms: i32, runtime_assets: *const window_asset
 
 fn drawMenuPanelShell(timeline_ms: i32, runtime_assets: *const window_assets.RuntimeAssets, rect: rl.Rectangle, title_row: i32) void {
     drawMenuBackdropAndSign(timeline_ms, runtime_assets);
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    const panel_rect = rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    const panel_rect = rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
     window_ui.drawClassicMenuPanel(runtime_assets.texture(.ui_menu_panel), panel_rect, rl.Color.white, false);
     window_menu.drawAtlasLabelCentered(runtime_assets, title_row, panel_rect.y + 38.0, rl.Color.white);
 }
 
 fn drawMenuPanelShellNoTitle(timeline_ms: i32, runtime_assets: *const window_assets.RuntimeAssets, rect: rl.Rectangle) void {
     drawMenuBackdropAndSign(timeline_ms, runtime_assets);
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    const panel_rect = rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    const panel_rect = rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
     window_ui.drawClassicMenuPanel(runtime_assets.texture(.ui_menu_panel), panel_rect, rl.Color.white, false);
 }
 
@@ -1611,13 +1613,15 @@ fn openDropdown(state: *ControlsState, config: *const formats.crimson_cfg.Crimso
 }
 
 fn animatedLeftPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn animatedRightPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x - anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x - anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 test "options panel slider labels do not duplicate checkbox label" {

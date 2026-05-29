@@ -13,6 +13,7 @@ Contributor-facing docs for setup, workflows, and project tracking.
 - [Setup](setup.md)
 - [Workflows](workflows/index.md)
 - [Project tracking](project-tracking/index.md)
+- [PortMaster packaging](portmaster-rg35xxh.md)
 
 ## Related
 

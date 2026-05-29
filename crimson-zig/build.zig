@@ -2,8 +2,14 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const zemscripten = b.lazyImport(@This(), "zemscripten").?;
+    const raylib_zig = b.lazyImport(@This(), "raylib_zig").?;
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const raylib_platform = b.option(raylib_zig.PlatformBackend, "platform", "Choose the raylib platform backend") orelse .glfw;
+    const raylib_linux_display_backend = b.option(raylib_zig.LinuxDisplayBackend, "linux_display_backend", "Linux display backend for raylib desktop backends") orelse .X11;
+    const raylib_opengl_version = b.option(raylib_zig.OpenglVersion, "opengl_version", "OpenGL/GLES version for raylib") orelse .auto;
+    const raylib_linkage = b.option(std.builtin.LinkMode, "linkage", "Compile raylib as static or dynamic") orelse .static;
+    const raylib_config = b.option([]const u8, "raylib_config", "Extra C flags for raylib") orelse "-DSUPPORT_FILEFORMAT_JPG=1";
     const msgpack_dep = b.dependency("msgpack", .{
         .target = target,
         .optimize = optimize,
@@ -11,6 +17,11 @@ pub fn build(b: *std.Build) void {
     const raylib_dep = b.dependency("raylib_zig", .{
         .target = target,
         .optimize = optimize,
+        .platform = raylib_platform,
+        .linux_display_backend = raylib_linux_display_backend,
+        .opengl_version = raylib_opengl_version,
+        .linkage = raylib_linkage,
+        .config = raylib_config,
     });
     const raylib_module = raylib_dep.module("raylib");
     const raylib_artifact = raylib_dep.artifact("raylib");
@@ -49,9 +60,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     window_exe.root_module.linkLibrary(raylib_artifact);
-    b.installArtifact(window_exe);
+    if (raylib_platform == .sdl or raylib_platform == .sdl2) {
+        window_exe.root_module.linkSystemLibrary("SDL2", .{});
+    } else if (raylib_platform == .sdl3) {
+        window_exe.root_module.linkSystemLibrary("SDL3", .{});
+    }
+    const install_window_exe = b.addInstallArtifact(window_exe, .{});
+    b.getInstallStep().dependOn(&install_window_exe.step);
     const window_step = b.step("window", "Build raylib desktop playable slice");
-    window_step.dependOn(&window_exe.step);
+    window_step.dependOn(&install_window_exe.step);
 
     const quest_dump_exe = b.addExecutable(.{
         .name = "crimson-zig-quest-spawn-dump",

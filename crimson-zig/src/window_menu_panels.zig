@@ -16,6 +16,8 @@ const text_color = rl.Color.init(245, 236, 225, 255);
 const muted_text = rl.Color.init(171, 150, 132, 255);
 const accent_color = rl.Color.init(218, 80, 46, 255);
 const network_session_tooltip = "Host or join a live network session.";
+const play_game_panel_width: f32 = 510.0;
+const play_game_panel_preferred_x: f32 = 352.0;
 
 const player_count_labels = [_][:0]const u8{
     "1 player",
@@ -298,7 +300,12 @@ fn playGameLayoutFromPlayerCount(player_count_raw: u32, status: formats.game_cfg
     const y_step: f32 = if (tight_spacing) 28.0 else 32.0;
     const y_start: f32 = if (entries.len >= 6) 36.0 else if (tight_spacing) 42.0 else 48.0;
     const panel_height: f32 = if (entries.len >= 5) 322.0 else 278.0;
-    const panel_rect = animatedPanelRect(.{ .x = 352.0, .y = 150.0, .width = 510.0, .height = panel_height }, timeline_ms);
+    const panel_rect = animatedPanelRect(.{
+        .x = play_game_panel_preferred_x,
+        .y = 150.0,
+        .width = play_game_panel_width,
+        .height = panel_height,
+    }, timeline_ms);
     const base_pos = rl.Vector2.init(panel_rect.x + 266.0, panel_rect.y + 50.0);
     const drop_pos = rl.Vector2.init(base_pos.x + 80.0, base_pos.y + 1.0);
     const y_end = y_start + y_step * @as(f32, @floatFromInt(entries.len));
@@ -467,6 +474,17 @@ test "demo play game layout caps visible quest unlock progress" {
         full_has_typo = full_has_typo or entry.key == .typo;
     }
     try std.testing.expect(full_has_typo);
+}
+
+test "play game panel stays onscreen at handheld width" {
+    const fit = window_ui.fitRectWithin(
+        rl.Rectangle.init(play_game_panel_preferred_x, 150.0, play_game_panel_width, 322.0),
+        640.0,
+        480.0,
+        window_ui.panel_screen_margin,
+    );
+    try std.testing.expectEqual(@as(f32, 114.0), fit.x);
+    try std.testing.expectEqual(@as(f32, 142.0), fit.y);
 }
 
 fn drawPlayerCountWidget(state: *const PlayGameState, runtime_assets: *const window_assets.RuntimeAssets, layout: PlayGameLayout, player_count_raw: u32) void {
@@ -1064,8 +1082,9 @@ fn playerCountRowRect(layout: PlayGameLayout, idx: usize) rl.Rectangle {
 }
 
 fn animatedPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn setConfigGameMode(config: *formats.crimson_cfg.CrimsonCfg, mode: game_ids.GameModeId) bool {

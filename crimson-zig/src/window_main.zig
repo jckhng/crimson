@@ -2248,6 +2248,14 @@ const App = struct {
             return;
         }
 
+        if (rl.isKeyPressed(.escape)) {
+            highscore.saved = true;
+            highscore.save_error = null;
+            self.results_selection = 0;
+            self.audio.playUiButtonClick();
+            return;
+        }
+
         self.playNameInputTypeClicks(collectNameInput(highscore));
 
         const buttons = resultsHighscoreButtonsFor(results);
@@ -3003,8 +3011,9 @@ const App = struct {
 
         if (self.results) |results| {
             if (self.runtime_assets) |*runtime_assets| {
+                const screen_width: f32 = @floatFromInt(rl.getScreenWidth());
                 if (isQuestFailedResult(&results)) {
-                    const layout = questFailedResultsPanelLayoutForTimeline(@floatFromInt(rl.getScreenWidth()), results.timeline_ms);
+                    const layout = questFailedResultsPanelLayoutForTimeline(screen_width, results.timeline_ms);
                     drawTextureFit(
                         runtime_assets.texture(.ui_menu_panel),
                         rl.Rectangle.init(layout.top_left.x, layout.top_left.y, quest_failed_panel_w, quest_failed_panel_h),
@@ -3024,49 +3033,63 @@ const App = struct {
                     );
                     drawQuestFailedPreview(runtime_assets, &results, layout);
                 } else {
-                    const slide_x = resultsPanelSlideOffsetX(&results, results.timeline_ms);
-                    const center_x = @as(f32, @floatFromInt(rl.getScreenWidth())) * 0.5 + slide_x;
-                    drawTextureFit(runtime_assets.texture(.ui_menu_panel), rl.Rectangle.init(262.0 + slide_x, 116.0, 756.0, 392.0), colorWithAlpha(rl.Color.white, 0.96));
+                    const layout = resultsPanelLayoutForTimeline(&results, screen_width, results.timeline_ms);
+                    const panel_rect = rl.Rectangle.init(layout.top_left.x, layout.top_left.y, quest_failed_panel_w, quest_failed_panel_h);
+                    const center_x = layout.top_left.x + quest_failed_panel_w * 0.5;
+                    const summary_label_x = layout.top_left.x + 108.0;
+                    const summary_value_x = layout.top_left.x + 248.0;
+                    const breakdown_label_x = layout.top_left.x + 318.0;
+                    const breakdown_value_x = layout.top_left.x + 434.0;
+
+                    drawTextureFit(runtime_assets.texture(.ui_menu_panel), panel_rect, colorWithAlpha(rl.Color.white, 0.96));
                     switch (results.reason) {
-                        .dead => drawTextureFit(runtime_assets.texture(resultsBannerTextureId(.dead).?), rl.Rectangle.init(464.0 + slide_x, 136.0, 354.0, 48.0), colorWithAlpha(rl.Color.white, 0.96)),
-                        .completed => drawTextureFit(runtime_assets.texture(resultsBannerTextureId(.completed).?), rl.Rectangle.init(406.0 + slide_x, 136.0, 468.0, 48.0), colorWithAlpha(rl.Color.white, 0.96)),
-                        .abandoned, .runtime_error => drawSmallTextCenteredAtX(runtime_assets, resultsTitle(results.reason), center_x, 152.0, HudTextColor.accent),
+                        .dead => drawTextureFit(
+                            runtime_assets.texture(resultsBannerTextureId(.dead).?),
+                            fitResultsRectToScreen(rl.Rectangle.init(layout.banner_pos.x, layout.banner_pos.y, 354.0, 48.0), screen_width),
+                            colorWithAlpha(rl.Color.white, 0.96),
+                        ),
+                        .completed => drawTextureFit(
+                            runtime_assets.texture(resultsBannerTextureId(.completed).?),
+                            fitResultsRectToScreen(rl.Rectangle.init(layout.banner_pos.x, layout.banner_pos.y, 468.0, 48.0), screen_width),
+                            colorWithAlpha(rl.Color.white, 0.96),
+                        ),
+                        .abandoned, .runtime_error => drawSmallTextCenteredAtX(runtime_assets, resultsTitle(results.reason), center_x, layout.top_left.y + 123.0, HudTextColor.accent),
                     }
-                    drawSmallTextCenteredAtX(runtime_assets, resultsSubtitleFor(&results), center_x, 196.0, HudTextColor.primary);
-                    drawSmallText(runtime_assets, "TIME", 370.0 + slide_x, 258.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "XP", 370.0 + slide_x, 286.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "LEVEL", 370.0 + slide_x, 314.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "WEAPON", 370.0 + slide_x, 342.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "HP", 370.0 + slide_x, 370.0, HudTextColor.dim);
+                    drawSmallTextCenteredAtX(runtime_assets, resultsSubtitleFor(&results), center_x, layout.top_left.y + 167.0, HudTextColor.primary);
+                    drawSmallText(runtime_assets, "TIME", summary_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
+                    drawSmallText(runtime_assets, "XP", summary_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
+                    drawSmallText(runtime_assets, "LEVEL", summary_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
+                    drawSmallText(runtime_assets, "WEAPON", summary_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
+                    drawSmallText(runtime_assets, "HP", summary_label_x, layout.top_left.y + 341.0, HudTextColor.dim);
                     const elapsed_ms = if (results.quest_final_time != null)
                         questResultsDisplayBreakdown(&results).final_time_ms
                     else
                         @as(i32, @intCast(results.summary.elapsed_ms_sim));
                     var elapsed_buf: [16]u8 = undefined;
-                    drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&elapsed_buf, elapsed_ms), 510.0 + slide_x, 258.0, HudTextColor.primary);
-                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_experience}, 510.0 + slide_x, 286.0, HudTextColor.primary);
-                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_level}, 510.0 + slide_x, 314.0, HudTextColor.primary);
-                    drawSmallText(runtime_assets, weaponName(results.summary.player_weapon_id, results.run_config.preserve_bugs), 510.0 + slide_x, 342.0, HudTextColor.primary);
+                    drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&elapsed_buf, elapsed_ms), summary_value_x, layout.top_left.y + 229.0, HudTextColor.primary);
+                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_experience}, summary_value_x, layout.top_left.y + 257.0, HudTextColor.primary);
+                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_level}, summary_value_x, layout.top_left.y + 285.0, HudTextColor.primary);
+                    drawSmallText(runtime_assets, weaponName(results.summary.player_weapon_id, results.run_config.preserve_bugs), summary_value_x, layout.top_left.y + 313.0, HudTextColor.primary);
                     const player_health = if (results.player_health_count > 0) results.player_health_values[0] else 0.0;
-                    drawSmallTextFmt("{d:.1}", runtime_assets, .{player_health}, 510.0 + slide_x, 370.0, HudTextColor.primary);
+                    drawSmallTextFmt("{d:.1}", runtime_assets, .{player_health}, summary_value_x, layout.top_left.y + 341.0, HudTextColor.primary);
                     if (results.quest_final_time != null) {
                         const breakdown = questResultsDisplayBreakdown(&results);
                         const base_color = questResultsBreakdownRowColor(&results, 0, false);
                         const life_color = questResultsBreakdownRowColor(&results, 1, false);
                         const perk_color = questResultsBreakdownRowColor(&results, 2, false);
                         const final_color = questResultsBreakdownRowColor(&results, 3, true);
-                        drawSmallText(runtime_assets, "BASE", 690.0 + slide_x, 258.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "LIFE BONUS", 690.0 + slide_x, 286.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "PERK BONUS", 690.0 + slide_x, 314.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "FINAL", 690.0 + slide_x, 342.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "BASE", breakdown_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "LIFE BONUS", breakdown_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "PERK BONUS", breakdown_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "FINAL", breakdown_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
                         var base_buf: [16]u8 = undefined;
                         var life_buf: [16]u8 = undefined;
                         var perk_buf: [16]u8 = undefined;
                         var final_buf: [16]u8 = undefined;
-                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&base_buf, breakdown.base_time_ms), 846.0 + slide_x, 258.0, base_color);
-                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&life_buf, breakdown.life_bonus_ms)}, 846.0 + slide_x, 286.0, life_color);
-                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&perk_buf, breakdown.unpicked_perk_bonus_ms)}, 846.0 + slide_x, 314.0, perk_color);
-                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), 846.0 + slide_x, 342.0, final_color);
+                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&base_buf, breakdown.base_time_ms), breakdown_value_x, layout.top_left.y + 229.0, base_color);
+                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&life_buf, breakdown.life_bonus_ms)}, breakdown_value_x, layout.top_left.y + 257.0, life_color);
+                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&perk_buf, breakdown.unpicked_perk_bonus_ms)}, breakdown_value_x, layout.top_left.y + 285.0, perk_color);
+                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), breakdown_value_x, layout.top_left.y + 313.0, final_color);
                     }
                     if (!questResultsBreakdownPending(&results)) {
                         drawQuestUnlockResults(runtime_assets, &results);
@@ -3075,7 +3098,8 @@ const App = struct {
 
                 const breakdown_pending = questResultsBreakdownPending(&results);
                 if (results.runtime_error) |runtime_error| {
-                    drawSmallText(runtime_assets, runtime_error, 330.0, 430.0, rl.Color.orange);
+                    const layout = resultsPanelLayoutForTimeline(&results, screen_width, results.timeline_ms);
+                    drawSmallText(runtime_assets, runtime_error, layout.top_left.x + 222.0, layout.top_left.y + 314.0, rl.Color.orange);
                 }
                 if (!breakdown_pending and results.highscore != null) {
                     const highscore = results.highscore.?;
@@ -3246,6 +3270,7 @@ pub fn main(init: std.process.Init) !void {
     const initial_height = args.height orelse runtime.windowHeight(window_height);
     rl.initWindow(initial_width, initial_height, "crimson-zig");
     defer rl.closeWindow();
+    rl.setExitKey(.null);
     rl.hideCursor();
     defer rl.showCursor();
 
@@ -3860,7 +3885,7 @@ fn gameOverResultsPanelLayout(screen_width: f32) ResultsPanelLayout {
 fn gameOverResultsPanelLayoutForTimeline(screen_width: f32, timeline_ms: i32) ResultsPanelLayout {
     const slide_x = resultsPanelSlideOffsetXForKind(.cubic_250, timeline_ms);
     const top_left = rl.Vector2.init(
-        -24.0 + slide_x,
+        resultsPanelOpenX(-24.0, screen_width) + slide_x,
         29.0 + window_menu.menuWidescreenYShift(screen_width),
     );
     return .{
@@ -3876,7 +3901,7 @@ fn questFailedResultsPanelLayout(screen_width: f32) ResultsPanelLayout {
 fn questFailedResultsPanelLayoutForTimeline(screen_width: f32, timeline_ms: i32) ResultsPanelLayout {
     const slide_x = resultsPanelSlideOffsetXForKind(.cubic_250, timeline_ms);
     const top_left = rl.Vector2.init(
-        -108.0 + slide_x,
+        resultsPanelOpenX(-108.0, screen_width) + slide_x,
         29.0 + window_menu.menuWidescreenYShift(screen_width),
     );
     return .{
@@ -3895,13 +3920,32 @@ fn questResultsPanelLayout(screen_width: f32) ResultsPanelLayout {
 fn questResultsPanelLayoutForTimeline(screen_width: f32, timeline_ms: i32) ResultsPanelLayout {
     const slide_x = resultsPanelSlideOffsetXForKind(.quest_completed, timeline_ms);
     const top_left = rl.Vector2.init(
-        -108.0 + slide_x,
+        resultsPanelOpenX(-108.0, screen_width) + slide_x,
         29.0 + window_menu.menuWidescreenYShift(screen_width),
     );
     return .{
         .top_left = top_left,
         .banner_pos = rl.Vector2.init(top_left.x + 202.0, top_left.y + 36.0),
     };
+}
+
+fn resultsPanelOpenX(preferred_x: f32, screen_width: f32) f32 {
+    const margin = window_ui.panel_screen_margin;
+    if (screen_width <= quest_failed_panel_w + margin * 2.0) return margin;
+    return @max(margin, @min(preferred_x, screen_width - quest_failed_panel_w - margin));
+}
+
+fn fitResultsRectToScreen(rect: rl.Rectangle, screen_width: f32) rl.Rectangle {
+    const margin = window_ui.panel_screen_margin;
+    if (screen_width <= rect.width + margin * 2.0) {
+        return rl.Rectangle.init(margin, rect.y, rect.width, rect.height);
+    }
+    return rl.Rectangle.init(
+        @max(margin, @min(rect.x, screen_width - rect.width - margin)),
+        rect.y,
+        rect.width,
+        rect.height,
+    );
 }
 
 fn resultsPanelLayoutForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) ResultsPanelLayout {
@@ -4285,8 +4329,9 @@ fn questLevelKeyToIndex(level_key: i32) i32 {
 
 fn drawQuestUnlockResults(runtime_assets: *const window_assets.RuntimeAssets, results: *const ResultsScreen) void {
     if (results.run_config.game_mode != .quests or results.reason != .completed) return;
-    const x = 690.0 + resultsPanelSlideOffsetX(results, results.timeline_ms);
-    var y: f32 = 394.0;
+    const layout = questResultsPanelLayoutForTimeline(@floatFromInt(rl.getScreenWidth()), results.timeline_ms);
+    const x = layout.top_left.x + 270.0;
+    var y: f32 = layout.top_left.y + 365.0;
     if (results.quest_unlock_weapon_name) |name| {
         drawSmallText(runtime_assets, questUnlockResultLabel(.weapon), x, y + 1.0, HudTextColor.dim);
         drawSmallText(runtime_assets, name, x, y + 14.0, HudTextColor.accent);
@@ -5301,13 +5346,13 @@ test "quest failed result uses retry subtitle" {
 
 test "quest failed panel layout uses native anchor" {
     const layout_640 = questFailedResultsPanelLayout(640.0);
-    try std.testing.expectEqual(@as(f32, -108.0), layout_640.top_left.x);
+    try std.testing.expectEqual(@as(f32, 16.0), layout_640.top_left.x);
     try std.testing.expectEqual(@as(f32, 29.0), layout_640.top_left.y);
-    try std.testing.expectEqual(@as(f32, 106.0), layout_640.banner_pos.x);
+    try std.testing.expectEqual(@as(f32, 230.0), layout_640.banner_pos.x);
     try std.testing.expectEqual(@as(f32, 69.0), layout_640.banner_pos.y);
 
     const layout_1024 = questFailedResultsPanelLayout(1024.0);
-    try std.testing.expectEqual(@as(f32, -108.0), layout_1024.top_left.x);
+    try std.testing.expectEqual(@as(f32, 16.0), layout_1024.top_left.x);
     try std.testing.expectEqual(@as(f32, 119.0), layout_1024.top_left.y);
 }
 
@@ -5320,7 +5365,7 @@ test "quest failed result action buttons use native panel anchor" {
         .summary = undefined,
     };
     const layout = resultsActionButtonLayout(&results, 640.0);
-    try std.testing.expectEqual(@as(f32, 158.0), layout.x);
+    try std.testing.expectEqual(@as(f32, 282.0), layout.x);
     try std.testing.expectEqual(@as(f32, 269.0), layout.y);
 
     const labels = resultsButtonLabelsFor(&results);
@@ -5449,7 +5494,7 @@ test "results open timeline animates panels from native closed edge" {
         .summary = undefined,
     };
     const game_over_closed = gameOverResultsPanelLayoutForTimeline(640.0, game_over_results.timeline_ms);
-    try std.testing.expectApproxEqAbs(@as(f32, -534.0), game_over_closed.top_left.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -494.0), game_over_closed.top_left.x, 1e-6);
 
     game_over_results.advanceOpen(0.10);
     const game_over_mid = gameOverResultsPanelLayoutForTimeline(640.0, game_over_results.timeline_ms);
@@ -5468,7 +5513,7 @@ test "results open timeline animates panels from native closed edge" {
         .summary = undefined,
     };
     const quest_hidden = questResultsPanelLayoutForTimeline(640.0, quest_completed_results.timeline_ms);
-    try std.testing.expectApproxEqAbs(@as(f32, -618.0), quest_hidden.top_left.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -494.0), quest_hidden.top_left.x, 1e-6);
     quest_completed_results.advanceOpen(0.10);
     try std.testing.expectEqual(@as(i32, quest_results_slide_start_ms), quest_completed_results.timeline_ms);
     try std.testing.expectApproxEqAbs(quest_hidden.top_left.x, questResultsPanelLayoutForTimeline(640.0, quest_completed_results.timeline_ms).top_left.x, 1e-6);
@@ -5490,12 +5535,12 @@ test "game over result action buttons use native banner anchor" {
         },
     };
     const layout = resultsActionButtonLayout(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 242.0), layout.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 282.0), layout.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 279.0), layout.y, 1e-6);
 
     const first = resultsActionButtonRect("Play Again", layout, 0);
     const second = resultsActionButtonRect("High scores", layout, 1);
-    try std.testing.expectApproxEqAbs(@as(f32, 242.0), first.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 282.0), first.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 279.0), first.y, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 311.0), second.y, 1e-6);
 }
@@ -5514,7 +5559,7 @@ test "quest completed result action buttons use native score card anchor" {
         },
     };
     const layout = resultsActionButtonLayout(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 162.0), layout.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 286.0), layout.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 215.0), layout.y, 1e-6);
 
     const labels = resultsButtonLabelsFor(&results);
@@ -5535,7 +5580,7 @@ test "quest completed result action buttons move below unlock lines" {
         .quest_unlock_perk_name = "Fastloader",
     };
     const layout = resultsActionButtonLayout(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 162.0), layout.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 286.0), layout.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 275.0), layout.y, 1e-6);
 }
 
@@ -5560,28 +5605,28 @@ test "results high score prompt uses native ok submit button" {
 
     try std.testing.expectEqual(@as(usize, 1), buttons.len);
     try std.testing.expectEqualStrings("OK", buttons.items[0].label);
-    try std.testing.expectApproxEqAbs(@as(f32, 368.0), buttons.items[0].rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 408.0), buttons.items[0].rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 185.0), buttons.items[0].rect.y, 1e-6);
 
     const prompt = resultsHighscorePromptLayout(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 240.0), prompt.prompt_x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 280.0), prompt.prompt_x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 153.0), prompt.prompt_y, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 198.0), prompt.input_rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 238.0), prompt.input_rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 193.0), prompt.input_rect.y, 1e-6);
 
     const score_card = resultsNameEntryScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 214.0), score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 254.0), score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 269.0), score_card.y, 1e-6);
 
     const clock = resultsNameEntryClockLayout(score_card, 90_000);
-    try std.testing.expectApproxEqAbs(@as(f32, 322.0), clock.table_rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 362.0), clock.table_rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 283.0), clock.table_rect.y, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 338.0), clock.pointer_rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 378.0), clock.pointer_rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 299.0), clock.pointer_rect.y, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 540.0), clock.rotation, 1e-6);
 
     const saved_score_card = resultsSavedScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 220.0), saved_score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 260.0), saved_score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 149.0), saved_score_card.y, 1e-6);
 }
 
@@ -5593,11 +5638,11 @@ test "game over score too low message uses native banner anchor" {
         .score_too_low_for_top100 = true,
     };
     const pos = resultsScoreTooLowMessagePos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 228.0), pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 268.0), pos.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 131.0), pos.y, 1e-6);
 
     const score_card = resultsSavedScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 220.0), score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 260.0), score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 147.0), score_card.y, 1e-6);
 
     var rank_buf: [16]u8 = undefined;
@@ -5621,21 +5666,21 @@ test "quest results high score prompt uses native ok submit button" {
 
     try std.testing.expectEqual(@as(usize, 1), buttons.len);
     try std.testing.expectEqualStrings("OK", buttons.items[0].label);
-    try std.testing.expectApproxEqAbs(@as(f32, 282.0), buttons.items[0].rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 406.0), buttons.items[0].rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 171.0), buttons.items[0].rect.y, 1e-6);
 
     const prompt = resultsHighscorePromptLayout(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 154.0), prompt.prompt_x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 278.0), prompt.prompt_x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 147.0), prompt.prompt_y, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 112.0), prompt.input_rect.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 236.0), prompt.input_rect.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 179.0), prompt.input_rect.y, 1e-6);
 
     const score_card = resultsNameEntryScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 138.0), score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 262.0), score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 225.0), score_card.y, 1e-6);
 
     const saved_score_card = resultsSavedScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 142.0), saved_score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 266.0), saved_score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 141.0), saved_score_card.y, 1e-6);
 }
 
@@ -5650,11 +5695,11 @@ test "quest result score too low message uses native score card anchor" {
         .score_too_low_for_top100 = true,
     };
     const pos = resultsScoreTooLowMessagePos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 150.0), pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 274.0), pos.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 131.0), pos.y, 1e-6);
 
     const score_card = resultsSavedScoreCardPos(&results, 640.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 142.0), score_card.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 266.0), score_card.x, 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 153.0), score_card.y, 1e-6);
 
     var rank_buf: [16]u8 = undefined;

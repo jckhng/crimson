@@ -302,9 +302,8 @@ pub fn writeHighscoreRecords(
     records: []const HighScoreRecord,
     now: ?DateStamp,
 ) HighScoreError!void {
-    const io = std.Io.Threaded.global_single_threaded.io();
     if (std.fs.path.dirname(path)) |dir_path| {
-        try std.Io.Dir.cwd().createDirPath(io, dir_path);
+        try createDirPathLibc(dir_path);
     }
 
     var bytes: std.ArrayList(u8) = .empty;
@@ -321,10 +320,76 @@ pub fn writeHighscoreRecords(
         try appendU32(allocator, &bytes, checksum);
     }
 
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = bytes.items,
-    });
+    try writeFileLibc(path, bytes.items);
+}
+
+fn createDirPathLibc(path: []const u8) HighScoreError!void {
+    if (path.len == 0) return;
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var path_len: usize = 0;
+    if (path[0] == '/') {
+        path_buffer[0] = '/';
+        path_len = 1;
+    }
+
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (path_len != 0 and path_buffer[path_len - 1] != '/') {
+            if (path_len >= path_buffer.len) return error.Unexpected;
+            path_buffer[path_len] = '/';
+            path_len += 1;
+        }
+        if (path_len + part.len >= path_buffer.len) return error.Unexpected;
+        @memcpy(path_buffer[path_len .. path_len + part.len], part);
+        path_len += part.len;
+        try createDirLibc(path_buffer[0..path_len]);
+    }
+}
+
+fn createDirLibc(path: []const u8) HighScoreError!void {
+    var path_z: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return error.Unexpected;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+
+    switch (std.c.errno(std.c.mkdir(path_z[0..path.len :0].ptr, 0o777))) {
+        .SUCCESS, .EXIST => {},
+        .ACCES, .PERM => return error.AccessDenied,
+        .NOSPC => return error.NoSpaceLeft,
+        else => return error.Unexpected,
+    }
+}
+
+fn writeFileLibc(path: []const u8, bytes: []const u8) HighScoreError!void {
+    var path_z: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return error.Unexpected;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+
+    const file = std.c.fopen(path_z[0..path.len :0].ptr, "wb") orelse return switch (std.c.errno(-1)) {
+        .ACCES, .PERM => error.AccessDenied,
+        .NOSPC => error.NoSpaceLeft,
+        else => error.Unexpected,
+    };
+
+    if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, file) != bytes.len) {
+        _ = std.c.fclose(file);
+        return switch (std.c.errno(-1)) {
+            .ACCES, .PERM => error.AccessDenied,
+            .NOSPC => error.NoSpaceLeft,
+            else => error.Unexpected,
+        };
+    }
+
+    if (std.c.fclose(file) != 0) {
+        return switch (std.c.errno(-1)) {
+            .ACCES, .PERM => error.AccessDenied,
+            .NOSPC => error.NoSpaceLeft,
+            else => error.Unexpected,
+        };
+    }
 }
 
 pub fn readHighscoreTable(

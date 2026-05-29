@@ -636,8 +636,9 @@ fn drawPanelShellEx(state: *const PanelState, assets: *const window_assets.Runti
 }
 
 fn animatedPanelRect(timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(panel_rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, panel_rect.width, timeline_ms);
-    return rl.Rectangle.init(panel_rect.x + anim.offset_x, panel_rect.y, panel_rect.width, panel_rect.height);
+    return rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn drawNetworkRow(

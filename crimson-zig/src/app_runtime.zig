@@ -36,8 +36,7 @@ pub const DesktopRuntime = struct {
     pub fn init(allocator: std.mem.Allocator) DesktopRuntimeError!DesktopRuntime {
         const base_dir = (try runtime_paths.defaultRuntimeDir(allocator)) orelse return error.MissingRuntimeDir;
         errdefer allocator.free(base_dir);
-        const io = std.Io.Threaded.global_single_threaded.io();
-        try std.Io.Dir.cwd().createDirPath(io, base_dir);
+        try createDirPathLibc(base_dir);
 
         const config_path = try std.fs.path.join(allocator, &.{ base_dir, crimson_cfg_name });
         errdefer allocator.free(config_path);
@@ -45,13 +44,16 @@ pub const DesktopRuntime = struct {
         const status_path = try std.fs.path.join(allocator, &.{ base_dir, game_cfg_name });
         errdefer allocator.free(status_path);
 
+        const config = try loadOrCreateConfig(allocator, config_path);
+        const status = try loadOrCreateStatus(allocator, status_path);
+
         return .{
             .allocator = allocator,
             .base_dir = base_dir,
             .config_path = config_path,
             .status_path = status_path,
-            .config = try loadOrCreateConfig(allocator, config_path),
-            .status = try loadOrCreateStatus(allocator, status_path),
+            .config = config,
+            .status = status,
         };
     }
 
@@ -160,6 +162,43 @@ pub const DesktopRuntime = struct {
     }
 };
 
+fn createDirPathLibc(path: []const u8) DesktopRuntimeError!void {
+    if (path.len == 0) return;
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var path_len: usize = 0;
+    if (path[0] == '/') {
+        path_buffer[0] = '/';
+        path_len = 1;
+    }
+
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (path_len != 0 and path_buffer[path_len - 1] != '/') {
+            if (path_len >= path_buffer.len) return error.Unexpected;
+            path_buffer[path_len] = '/';
+            path_len += 1;
+        }
+        if (path_len + part.len >= path_buffer.len) return error.Unexpected;
+        @memcpy(path_buffer[path_len .. path_len + part.len], part);
+        path_len += part.len;
+        try createDirLibc(path_buffer[0..path_len]);
+    }
+}
+
+fn createDirLibc(path: []const u8) DesktopRuntimeError!void {
+    var path_z: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return error.Unexpected;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+
+    switch (std.c.errno(std.c.mkdir(path_z[0..path.len :0].ptr, 0o777))) {
+        .SUCCESS, .EXIST => {},
+        else => return error.Unexpected,
+    }
+}
+
 fn loadOrCreateConfig(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -180,11 +219,7 @@ fn loadOrCreateConfig(
 
 fn writeConfig(path: []const u8, cfg: formats.crimson_cfg.CrimsonCfg) DesktopRuntimeError!void {
     const bytes = formats.crimson_cfg.encode(cfg);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = bytes[0..],
-    });
+    try writeFileLibc(path, bytes[0..]);
 }
 
 fn loadOrCreateStatus(
@@ -210,11 +245,37 @@ fn loadOrCreateStatus(
 fn writeStatus(path: []const u8, status: formats.game_cfg.Status) DesktopRuntimeError!void {
     const decoded = formats.game_cfg.buildStatusBlob(status);
     const bytes = try formats.game_cfg.buildFile(decoded[0..]);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    try std.Io.Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = bytes[0..],
-    });
+    try writeFileLibc(path, bytes[0..]);
+}
+
+fn writeFileLibc(path: []const u8, bytes: []const u8) DesktopRuntimeError!void {
+    var path_z: [std.Io.Dir.max_path_bytes:0]u8 = undefined;
+    if (path.len >= path_z.len) return error.Unexpected;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+
+    const file = std.c.fopen(path_z[0..path.len :0].ptr, "wb") orelse return switch (std.c.errno(-1)) {
+        .ACCES, .PERM => error.AccessDenied,
+        .NOSPC => error.NoSpaceLeft,
+        else => error.Unexpected,
+    };
+
+    if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, file) != bytes.len) {
+        _ = std.c.fclose(file);
+        return switch (std.c.errno(-1)) {
+            .ACCES, .PERM => error.AccessDenied,
+            .NOSPC => error.NoSpaceLeft,
+            else => error.Unexpected,
+        };
+    }
+
+    if (std.c.fclose(file) != 0) {
+        return switch (std.c.errno(-1)) {
+            .ACCES, .PERM => error.AccessDenied,
+            .NOSPC => error.NoSpaceLeft,
+            else => error.Unexpected,
+        };
+    }
 }
 
 fn sanitizedWindowDimension(value: u32, fallback: i32) i32 {

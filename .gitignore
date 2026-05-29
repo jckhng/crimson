@@ -26,8 +26,10 @@ htmlcov/
 screenshots/
 zig-cache/
 .zig-cache/
+.zig-cache-global/
 zig-pkg/
 zig-out/
+zig-out*/
 /tools/zig/
 .DS_Store
 .mcp.json

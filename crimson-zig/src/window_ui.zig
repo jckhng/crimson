@@ -11,6 +11,7 @@ pub const UiButton = struct {
 pub const ui_shadow_offset: f32 = 7.0;
 pub const ui_shadow_tint = rl.Color.init(0x44, 0x44, 0x44, 0x44);
 pub const button_plate_height: f32 = 32.0;
+pub const panel_screen_margin: f32 = 16.0;
 
 pub fn centeredRect(center_x: f32, top_y: f32, width: f32, height: f32) rl.Rectangle {
     return .{
@@ -114,6 +115,31 @@ pub fn buttonAt(label: [:0]const u8, x: f32, y: f32, force_wide: bool) UiButton 
         .label = label,
         .rect = rl.Rectangle.init(x, y, buttonWidth(label, force_wide), button_plate_height),
     };
+}
+
+pub fn fitRectToScreen(rect: rl.Rectangle) rl.Rectangle {
+    return fitRectToScreenWithMargin(rect, panel_screen_margin);
+}
+
+pub fn fitRectToScreenWithMargin(rect: rl.Rectangle, margin: f32) rl.Rectangle {
+    const screen_width = screenDimensionOrDefault(rl.getScreenWidth(), 1024.0);
+    const screen_height = screenDimensionOrDefault(rl.getScreenHeight(), 768.0);
+    return fitRectWithin(rect, screen_width, screen_height, margin);
+}
+
+pub fn fitRectWithin(rect: rl.Rectangle, screen_width: f32, screen_height: f32, margin: f32) rl.Rectangle {
+    const max_x = screen_width - rect.width - margin;
+    const max_y = screen_height - rect.height - margin;
+    return rl.Rectangle.init(
+        @max(margin, @min(rect.x, max_x)),
+        @max(margin, @min(rect.y, max_y)),
+        rect.width,
+        rect.height,
+    );
+}
+
+fn screenDimensionOrDefault(value: i32, fallback: f32) f32 {
+    return if (value > 0) @floatFromInt(value) else fallback;
 }
 
 fn approxButtonTextWidth(label: []const u8) f32 {

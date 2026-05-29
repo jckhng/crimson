@@ -24,14 +24,14 @@ const terrain_overlay_tint = rl.Color.init(178, 178, 178, 230);
 const terrain_detail_tint = rl.Color.init(178, 178, 178, 153);
 
 const alpha_test_vs: [:0]const u8 =
-    \\#version 330
+    \\#version 100
     \\
-    \\in vec3 vertexPosition;
-    \\in vec2 vertexTexCoord;
-    \\in vec4 vertexColor;
+    \\attribute vec3 vertexPosition;
+    \\attribute vec2 vertexTexCoord;
+    \\attribute vec4 vertexColor;
     \\
-    \\out vec2 fragTexCoord;
-    \\out vec4 fragColor;
+    \\varying vec2 fragTexCoord;
+    \\varying vec4 fragColor;
     \\
     \\uniform mat4 mvp;
     \\
@@ -43,20 +43,20 @@ const alpha_test_vs: [:0]const u8 =
 ;
 
 const alpha_test_fs: [:0]const u8 =
-    \\#version 330
+    \\#version 100
     \\
-    \\in vec2 fragTexCoord;
-    \\in vec4 fragColor;
+    \\precision mediump float;
+    \\
+    \\varying vec2 fragTexCoord;
+    \\varying vec4 fragColor;
     \\
     \\uniform sampler2D texture0;
     \\uniform vec4 colDiffuse;
     \\
-    \\out vec4 finalColor;
-    \\
     \\void main() {
-    \\    vec4 texel = texture(texture0, fragTexCoord) * fragColor * colDiffuse;
+    \\    vec4 texel = texture2D(texture0, fragTexCoord) * fragColor * colDiffuse;
     \\    if (texel.a <= 0.0156862745) discard;
-    \\    finalColor = texel;
+    \\    gl_FragColor = texel;
     \\}
 ;
 

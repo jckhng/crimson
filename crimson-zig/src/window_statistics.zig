@@ -1147,18 +1147,21 @@ fn drawPerksPanels(
 }
 
 fn animatedCenterPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn animatedLeftPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(1, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x + anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x + anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn animatedRightPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
+    const fitted = window_ui.fitRectToScreen(rect);
     const anim = window_menu.uiElementAnim(2, panel_timeline_max_ms, 0, rect.width, timeline_ms);
-    return rl.Rectangle.init(rect.x - anim.offset_x, rect.y, rect.width, rect.height);
+    return rl.Rectangle.init(fitted.x - anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
 fn drawSplitPanelShell(assets: *const window_assets.RuntimeAssets, timeline_ms: i32) void {
