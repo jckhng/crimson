@@ -3,6 +3,7 @@ const std = @import("std");
 const cz = @import("crimson_zig");
 const game_ids = cz.game_ids;
 const formats = cz.formats;
+const local_input = cz.local_input;
 const quest_status = @import("quest_status.zig");
 const runtime_paths = cz.runtime_paths;
 const runtime_session = cz.session;
@@ -206,7 +207,7 @@ fn loadOrCreateConfig(
     const io = std.Io.Threaded.global_single_threaded.io();
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => {
-            const cfg = formats.crimson_cfg.defaultConfig();
+            const cfg = defaultConfigForRuntime();
             try writeConfig(path, cfg);
             return cfg;
         },
@@ -215,6 +216,29 @@ fn loadOrCreateConfig(
     defer allocator.free(bytes);
 
     return formats.crimson_cfg.decode(bytes);
+}
+
+fn defaultConfigForRuntime() formats.crimson_cfg.CrimsonCfg {
+    var cfg = formats.crimson_cfg.defaultConfig();
+    if (portmasterControlsEnabled()) {
+        cfg.player_mode_flag_p1 = @intCast(local_input.movement_control_dual_action_pad);
+        cfg.aim_scheme_p1 = @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad_auto_fire));
+
+        var binds = formats.crimson_cfg.playerBindBlock(&cfg, 0);
+        binds.axis_move_y = 0x140;
+        binds.axis_move_x = 0x13F;
+        binds.axis_aim_y = 0x141;
+        binds.axis_aim_x = 0x153;
+        binds.fire = 0x128;
+        formats.crimson_cfg.setPlayerBindBlock(&cfg, 0, binds);
+    }
+    return cfg;
+}
+
+fn portmasterControlsEnabled() bool {
+    const raw = std.c.getenv("CRIMSON_PORTMASTER_CONTROLS") orelse return false;
+    const value = std.mem.span(raw);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
 fn writeConfig(path: []const u8, cfg: formats.crimson_cfg.CrimsonCfg) DesktopRuntimeError!void {

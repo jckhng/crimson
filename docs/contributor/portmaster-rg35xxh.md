@@ -93,8 +93,12 @@ Behavior:
 - Writes runtime files to `crimson/runtime/`.
 - Loads original archives from `crimson/assets/`.
 - Uses PortMaster `runtime=blank`, `arch=aarch64`.
-- Starts `gptokeyb` with `crimson.gptk` by default for keyboard/mouse fallback
-  controls. Set `CRIMSON_USE_GPTOKEYB=0` to test native raylib gamepad input.
+- Seeds new configs with PortMaster controls when `CRIMSON_PORTMASTER_CONTROLS=1`:
+  left stick moves, right stick aims, and pushing the right stick fires.
+- Starts `gptokeyb` with `crimson.gptk` by default for keyboard/menu fallback
+  controls. Gameplay aiming uses native raylib gamepad axes instead of mouse
+  cursor emulation. Set `CRIMSON_USE_GPTOKEYB=0` to test native raylib gamepad
+  input only.
 
 ## Validation checklist
 
@@ -106,6 +110,8 @@ Behavior:
 - Boots from PortMaster and returns cleanly to menu shell on exit.
 - No writes outside `crimson/runtime/`.
 - Input verifies movement, aim/fire/reload, menu confirm/cancel.
+- New runtime config on PortMaster defaults to `Twin Stick Fire`; existing
+  runtime configs must be reset or edited to pick up the new scheme.
 - 10-minute Survival run without crash.
 - Saves/config/replays persist across relaunch.
 

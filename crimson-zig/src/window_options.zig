@@ -1183,12 +1183,19 @@ fn updateControlsRebinding(state: *ControlsState, config: *formats.crimson_cfg.C
 fn controlsRebindRows(config: *const formats.crimson_cfg.CrimsonCfg, player_index: usize) []const RebindRow {
     const move_mode = formats.crimson_cfg.playerMovement(config, player_index);
     const aim_scheme = formats.crimson_cfg.playerAimScheme(config, player_index);
+    const dual_action_aim = aimSchemeUsesDualActionAxes(aim_scheme);
     if (player_index == 0) {
         if (move_mode == @as(u32, @intCast(local_input.movement_control_mouse_point_click))) {
-            return switch (aim_scheme) {
-                @as(u32, @bitCast(@as(i32, local_input.aim_scheme_keyboard))) => controls_rows_p1_mouseclick_keyboard[0..],
-                @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad))) => controls_rows_p1_mouseclick_dual_pad[0..],
-                else => controls_rows_p1_mouseclick_default[0..],
+            if (aim_scheme == @as(u32, @bitCast(@as(i32, local_input.aim_scheme_keyboard)))) return controls_rows_p1_mouseclick_keyboard[0..];
+            if (dual_action_aim) return controls_rows_p1_mouseclick_dual_pad[0..];
+            return controls_rows_p1_mouseclick_default[0..];
+        }
+        if (dual_action_aim) {
+            return switch (move_mode) {
+                @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_p1_relative_dual_pad[0..],
+                @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_p1_static_dual_pad[0..],
+                @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_p1_dual_pad[0..],
+                else => controls_rows_p1_other_dual_pad[0..],
             };
         }
         return switch (aim_scheme) {
@@ -1197,12 +1204,6 @@ fn controlsRebindRows(config: *const formats.crimson_cfg.CrimsonCfg, player_inde
                 @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_p1_static_keyboard[0..],
                 @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_p1_move_pad_keyboard[0..],
                 else => controls_rows_p1_other_keyboard[0..],
-            },
-            @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad))) => switch (move_mode) {
-                @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_p1_relative_dual_pad[0..],
-                @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_p1_static_dual_pad[0..],
-                @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_p1_dual_pad[0..],
-                else => controls_rows_p1_other_dual_pad[0..],
             },
             else => switch (move_mode) {
                 @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_p1_relative_default[0..],
@@ -1214,10 +1215,16 @@ fn controlsRebindRows(config: *const formats.crimson_cfg.CrimsonCfg, player_inde
     }
 
     if (move_mode == @as(u32, @intCast(local_input.movement_control_mouse_point_click))) {
-        return switch (aim_scheme) {
-            @as(u32, @bitCast(@as(i32, local_input.aim_scheme_keyboard))) => controls_rows_mouseclick_keyboard[0..],
-            @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad))) => controls_rows_mouseclick_dual_pad[0..],
-            else => controls_rows_mouseclick_default[0..],
+        if (aim_scheme == @as(u32, @bitCast(@as(i32, local_input.aim_scheme_keyboard)))) return controls_rows_mouseclick_keyboard[0..];
+        if (dual_action_aim) return controls_rows_mouseclick_dual_pad[0..];
+        return controls_rows_mouseclick_default[0..];
+    }
+    if (dual_action_aim) {
+        return switch (move_mode) {
+            @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_relative_dual_pad[0..],
+            @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_static_dual_pad[0..],
+            @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_dual_pad[0..],
+            else => controls_rows_other_dual_pad[0..],
         };
     }
     return switch (aim_scheme) {
@@ -1227,12 +1234,6 @@ fn controlsRebindRows(config: *const formats.crimson_cfg.CrimsonCfg, player_inde
             @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_move_pad_keyboard[0..],
             else => controls_rows_other_keyboard[0..],
         },
-        @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad))) => switch (move_mode) {
-            @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_relative_dual_pad[0..],
-            @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_static_dual_pad[0..],
-            @as(u32, @intCast(local_input.movement_control_dual_action_pad)) => controls_rows_dual_pad[0..],
-            else => controls_rows_other_dual_pad[0..],
-        },
         else => switch (move_mode) {
             @as(u32, @intCast(local_input.movement_control_relative)) => controls_rows_relative_default[0..],
             @as(u32, @intCast(local_input.movement_control_static)) => controls_rows_static_default[0..],
@@ -1240,6 +1241,11 @@ fn controlsRebindRows(config: *const formats.crimson_cfg.CrimsonCfg, player_inde
             else => controls_rows_default[0..],
         },
     };
+}
+
+fn aimSchemeUsesDualActionAxes(aim_scheme: u32) bool {
+    return aim_scheme == @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad))) or
+        aim_scheme == @as(u32, @bitCast(@as(i32, local_input.aim_scheme_dual_action_pad_auto_fire)));
 }
 
 fn bindingValueText(row: RebindRow, config: *const formats.crimson_cfg.CrimsonCfg, player_index: usize, rebinding: bool) []const u8 {
@@ -1332,6 +1338,7 @@ const aim_items = [_]DropdownItem{
     .{ .label = "Joystick", .value = local_input.aim_scheme_joystick },
     .{ .label = "Mouse relative", .value = local_input.aim_scheme_mouse_relative },
     .{ .label = "Dual Action Pad", .value = local_input.aim_scheme_dual_action_pad },
+    .{ .label = "Twin Stick Fire", .value = local_input.aim_scheme_dual_action_pad_auto_fire },
 };
 
 const aim_items_with_computer = [_]DropdownItem{
@@ -1340,6 +1347,7 @@ const aim_items_with_computer = [_]DropdownItem{
     .{ .label = "Joystick", .value = local_input.aim_scheme_joystick },
     .{ .label = "Mouse relative", .value = local_input.aim_scheme_mouse_relative },
     .{ .label = "Dual Action Pad", .value = local_input.aim_scheme_dual_action_pad },
+    .{ .label = "Twin Stick Fire", .value = local_input.aim_scheme_dual_action_pad_auto_fire },
     .{ .label = "Computer", .value = local_input.aim_scheme_computer },
 };
 

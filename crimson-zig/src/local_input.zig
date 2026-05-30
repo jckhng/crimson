@@ -32,6 +32,7 @@ pub const aim_scheme_joystick: i32 = 2;
 pub const aim_scheme_mouse_relative: i32 = 3;
 pub const aim_scheme_dual_action_pad: i32 = 4;
 pub const aim_scheme_computer: i32 = 5;
+pub const aim_scheme_dual_action_pad_auto_fire: i32 = 6;
 
 const alt_move_key_up: i32 = 0xC8;
 const alt_move_key_down: i32 = 0xD0;
@@ -206,7 +207,7 @@ pub const LocalInputInterpreter = struct {
                     aim = aimPointFromHeading(player.pos, heading, aim_radius_keyboard);
                 }
             },
-            aim_scheme_dual_action_pad => {
+            aim_scheme_dual_action_pad, aim_scheme_dual_action_pad_auto_fire => {
                 const axis_y = sampler.axisValue(aim_axis_y, @intCast(idx));
                 const axis_x = sampler.axisValue(aim_axis_x, @intCast(idx));
                 const axis_vec: state_mod.Vec2 = .{ .x = axis_x, .y = axis_y };
@@ -277,6 +278,13 @@ pub const LocalInputInterpreter = struct {
         const fire_pressed = sampler.codeIsPressed(fire_key, @intCast(idx));
         if (aim_scheme == aim_scheme_computer and computer_auto_fire) {
             fire_down = true;
+        }
+        if (aim_scheme == aim_scheme_dual_action_pad_auto_fire) {
+            const axis_vec: state_mod.Vec2 = .{
+                .x = sampler.axisValue(aim_axis_x, @intCast(idx)),
+                .y = sampler.axisValue(aim_axis_y, @intCast(idx)),
+            };
+            fire_down = fire_down or lengthSq(axis_vec) > 1e-9;
         }
         const reload_pressed = sampler.codeIsPressed(reload_key, @intCast(idx));
         const reload_down = sampler.codeIsDown(reload_key, @intCast(idx));
@@ -811,6 +819,32 @@ test "dual action pad aim uses native radius scale" {
         &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{},
     );
 
+    try expectFloatClose(238.0, out.aim_x);
+    try expectFloatClose(100.0, out.aim_y);
+}
+
+test "dual action pad auto fire shoots while aiming" {
+    var interpreter: LocalInputInterpreter = .{};
+    const player = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 160.0, .y = 100.0 }, 0.0);
+    var cfg = formats.crimson_cfg.defaultConfig();
+    cfg.aim_scheme_p1 = @bitCast(@as(i32, aim_scheme_dual_action_pad_auto_fire));
+
+    const binds = formats.crimson_cfg.playerBindBlock(&cfg, 0);
+    const out = interpreter.buildPlayerInput(
+        .{ .axes = &.{.{ .player_index = 0, .code = binds.axis_aim_x, .value = 1.0 }} },
+        0,
+        1,
+        &player,
+        &cfg,
+        .{},
+        .{},
+        .{},
+        0.1,
+        &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{},
+    );
+
+    try std.testing.expect(out.flags.fire_down);
+    try std.testing.expect(!out.flags.fire_pressed);
     try expectFloatClose(238.0, out.aim_x);
     try expectFloatClose(100.0, out.aim_y);
 }

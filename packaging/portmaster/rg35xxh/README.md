@@ -11,6 +11,8 @@ pass `--assets-dir` to the package script:
 
 Runtime files are written under `crimson/runtime/`.
 
-Controls use `crimson.gptk` by default for menu/gameplay keyboard and mouse
-fallbacks. Set `CRIMSON_USE_GPTOKEYB=0` before launching to test native
-raylib gamepad input only.
+New runtime configs default to left-stick movement and right-stick aim/fire.
+Controls use `crimson.gptk` by default for keyboard/menu fallbacks, but
+gameplay aiming uses native raylib gamepad axes instead of mouse cursor
+emulation. Set `CRIMSON_USE_GPTOKEYB=0` before launching to test native raylib
+gamepad input only.
