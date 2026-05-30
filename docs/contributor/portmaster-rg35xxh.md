@@ -7,6 +7,11 @@ tags:
 
 # PortMaster packaging (RG35XXH / muOS)
 
+This is downstream PortMaster branch documentation. The branch intentionally
+contains handheld UX adaptations, including controller-first menus and
+Twin Stick Fire, which are not meant to be treated as faithful-reimplementation
+parity changes.
+
 This package path targets the native Zig window executable instead of the old
 Python/raylib/Nuitka bundle.
 

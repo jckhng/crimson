@@ -1,6 +1,8 @@
 # Crimson PortMaster package scaffold
 
 This template is staged by `scripts/portmaster/build_zig_aarch64_bundle.sh`.
+It is intended for the downstream PortMaster branch/fork, not as a
+parity-preserving upstream package.
 
 Copy the original game archives into `crimson/assets/` before launching. For
 local testing only, pass `--assets-dir` to the package script:
