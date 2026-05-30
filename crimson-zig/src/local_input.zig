@@ -214,7 +214,11 @@ pub const LocalInputInterpreter = struct {
                 const axis_x = sampler.axisValue(aim_axis_x, @intCast(idx));
                 const axis_vec: state_mod.Vec2 = .{ .x = axis_x, .y = axis_y };
                 const mag_sq = lengthSq(axis_vec);
-                if (mag_sq > 1e-9) {
+                const aim_active = if (aim_scheme == aim_scheme_dual_action_pad_auto_fire)
+                    mag_sq >= dual_action_auto_fire_threshold_sq
+                else
+                    mag_sq > 1e-9;
+                if (aim_active) {
                     const mag = length(axis_vec);
                     const axis_dir = if (mag > 1e-9) axis_vec.mul(1.0 / mag) else state_mod.Vec2{};
                     heading = toHeading(axis_dir);
@@ -900,6 +904,8 @@ test "dual action pad auto fire ignores small aim drift" {
 
     try std.testing.expect(!out.flags.fire_down);
     try std.testing.expect(!out.flags.fire_pressed);
+    try expectFloatClose(100.0, out.aim_x);
+    try expectFloatClose(40.0, out.aim_y);
 }
 
 test "keyboard aim in static mode reanchors to heading" {
