@@ -45,6 +45,7 @@ const aim_pov_right_code: i32 = 0x134;
 
 pub const PerPlayerInputState = struct {
     aim_heading: f32 = 0.0,
+    aim_dir: state_mod.Vec2 = .{ .x = 0.0, .y = -1.0 },
     move_target: state_mod.Vec2 = .{ .x = -1.0, .y = -1.0 },
     computer_target_creature_index: i32 = -1,
 };
@@ -221,11 +222,13 @@ pub const LocalInputInterpreter = struct {
                 if (aim_active) {
                     const mag = length(axis_vec);
                     const axis_dir = if (mag > 1e-9) axis_vec.mul(1.0 / mag) else state_mod.Vec2{};
+                    state.aim_dir = axis_dir;
                     heading = toHeading(axis_dir);
                     const radius = aim_radius_pad_base + mag * aim_radius_pad_scale;
                     aim = add(player.pos, axis_dir.mul(radius));
                 } else {
-                    aim = aimPointFromHeading(player.pos, heading, aim_radius_keyboard);
+                    heading = toHeading(state.aim_dir);
+                    aim = add(player.pos, state.aim_dir.mul(aim_radius_keyboard));
                 }
             },
             aim_scheme_joystick => {
@@ -904,6 +907,21 @@ test "dual action pad auto fire ignores small aim drift" {
 
     try std.testing.expect(!out.flags.fire_down);
     try std.testing.expect(!out.flags.fire_pressed);
+    try expectFloatClose(100.0, out.aim_x);
+    try expectFloatClose(40.0, out.aim_y);
+}
+
+test "dual action pad auto fire idle aim ignores player heading oscillation" {
+    var interpreter: LocalInputInterpreter = .{};
+    var cfg = formats.crimson_cfg.defaultConfig();
+    cfg.aim_scheme_p1 = @bitCast(@as(i32, aim_scheme_dual_action_pad_auto_fire));
+    const player_up = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 100.0, .y = 40.0 }, std.math.pi / 2.0);
+    const player_down = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 100.0, .y = 160.0 }, -std.math.pi / 2.0);
+
+    _ = interpreter.buildPlayerInput(.{}, 0, 1, &player_up, &cfg, .{}, .{}, .{}, 0.1, &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{});
+    const out = interpreter.buildPlayerInput(.{}, 0, 1, &player_down, &cfg, .{}, .{}, .{}, 0.1, &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{});
+
+    try std.testing.expect(!out.flags.fire_down);
     try expectFloatClose(100.0, out.aim_x);
     try expectFloatClose(40.0, out.aim_y);
 }
