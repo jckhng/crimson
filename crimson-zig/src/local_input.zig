@@ -17,7 +17,7 @@ pub const computer_move_target_radius: f32 = 300.0;
 pub const computer_aim_snap_distance: f32 = 4.0;
 pub const computer_aim_track_gain: f32 = 6.0;
 pub const computer_auto_fire_distance: f32 = 128.0;
-pub const dual_action_auto_fire_threshold: f32 = 0.35;
+pub const dual_action_auto_fire_threshold: f32 = 0.6;
 const dual_action_auto_fire_threshold_sq: f32 = dual_action_auto_fire_threshold * dual_action_auto_fire_threshold;
 
 pub const movement_control_unknown: i32 = 0;
