@@ -72,6 +72,9 @@ scripts/portmaster/build_zig_aarch64_bundle.sh \
 
 The package script auto-detects the generated `libraylib.so` under
 `crimson-zig/.zig-cache/o`. Pass `--lib-dir` only if you need to override that.
+Use `--assets-dir` only for local device testing. Public release zips should not
+include `crimson.paq`, `music.paq`, or `sfx.paq`; users must provide their own
+archives.
 
 Copy `artifacts/portmaster/Crimson-rg35xxh-zig-portmaster.zip` to the device.
 
@@ -95,6 +98,7 @@ Behavior:
 - Uses PortMaster `runtime=blank`, `arch=aarch64`.
 - Seeds new configs with PortMaster controls when `CRIMSON_PORTMASTER_CONTROLS=1`:
   left stick moves, right stick aims, and pushing the right stick fires.
+- Hides Crimson's custom UI cursor when `CRIMSON_HIDE_UI_CURSOR=1`.
 - Starts `gptokeyb` with `crimson.gptk` by default for keyboard/menu fallback
   controls. Gameplay aiming uses native raylib gamepad axes instead of mouse
   cursor emulation. Set `CRIMSON_USE_GPTOKEYB=0` to test native raylib gamepad
@@ -145,5 +149,6 @@ Known handheld-specific rules:
    PortMaster submission values.
 5. Capture a clean device log from first launch, gameplay launch, score save,
    and quit.
-6. Submit the package with assets excluded; users must provide the original
-   Crimsonland `.paq` files.
+6. Submit the package with assets excluded; users must provide Crimsonland
+   `.paq` files from their own installation. Do not include demo `.paq` files
+   unless explicit redistribution permission is confirmed.

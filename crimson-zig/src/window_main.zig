@@ -68,6 +68,12 @@ const window_height = 768;
 const demo_attract_variant_count: i32 = 6;
 const demo_attract_limit_ms: i32 = 4_000;
 const demo_attract_purchase_screen_limit_ms: i32 = 16_000;
+
+fn envFlagEnabled(name: [:0]const u8) bool {
+    const raw = std.c.getenv(name) orelse return false;
+    const value = std.mem.span(raw);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
+}
 const end_note_timeline_max_ms: i32 = 300;
 const demo_upsell_messages = [_][:0]const u8{
     "Want more Levels?",
@@ -1087,6 +1093,7 @@ const App = struct {
     demo_enabled: bool = false,
     debug_enabled: bool = false,
     preserve_bugs: bool = false,
+    hide_ui_cursor: bool = false,
     demo_trial_elapsed_ms: i32 = 0,
     demo_trial_info: demo_trial.OverlayInfo = .{},
     demo_trial_ui: window_demo_trial.State = .{},
@@ -1110,6 +1117,7 @@ const App = struct {
             .demo_enabled = args.demo_enabled,
             .debug_enabled = args.debug_enabled,
             .preserve_bugs = args.preserve_bugs,
+            .hide_ui_cursor = envFlagEnabled("CRIMSON_HIDE_UI_CURSOR"),
             .next_seed_override = args.seed,
             .player_count_override = args.player_count,
             .detail_preset_override = args.detail_preset,
@@ -1251,6 +1259,7 @@ const App = struct {
     }
 
     fn drawUiCursor(self: *const App) void {
+        if (self.hide_ui_cursor) return;
         const assets = if (self.runtime_assets) |*runtime_assets| runtime_assets else return;
         switch (self.screen) {
             .boot => {},
