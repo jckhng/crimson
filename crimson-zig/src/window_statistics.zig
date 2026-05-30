@@ -45,6 +45,7 @@ const right_panel_rect = rl.Rectangle.init(678.0, 174.0, 424.0, 276.0);
 const stats_panel_rect = rl.Rectangle.init(390.0, 168.0, 510.0, 378.0);
 const credits_panel_rect = rl.Rectangle.init(360.0, 168.0, 510.0, 378.0);
 const azk_panel_rect = rl.Rectangle.init(360.0, 168.0, 510.0, 378.0);
+const compact_split_screen_width: u32 = 768;
 
 const HubAction = enum {
     high_scores,
@@ -499,7 +500,6 @@ fn updateHighScores(
     const timeline_update = advanceChildTimeline(state, frame_dt);
     if (timeline_update.closed_action) |action| return finishChildAction(state, action);
     const left_rect = animatedLeftPanelRect(left_panel_rect, state.hub.panel.timeline_ms);
-    const right_rect = animatedRightPanelRect(right_panel_rect, state.hub.panel.timeline_ms);
     const hs = &state.high_scores;
     const buttons = highScoreButtons(left_rect);
     if (!childInteractive(state)) return .{};
@@ -543,8 +543,11 @@ fn updateHighScores(
         return .{ .quest_level_key = quest_level_key, .config_dirty = true, .play_button_click = true };
     }
 
-    if (updateHighScoreWidgets(hs, allocator, base_dir, config, status, highScoreRightOptionsRect(right_rect, config.screen_width))) |widget_result| {
-        return widget_result;
+    if (!useCompactSplitPanelLayout(config.screen_width)) {
+        const right_rect = animatedRightPanelRect(right_panel_rect, state.hub.panel.timeline_ms);
+        if (updateHighScoreWidgets(hs, allocator, base_dir, config, status, highScoreRightOptionsRect(right_rect, config.screen_width))) |widget_result| {
+            return widget_result;
+        }
     }
 
     if (!window_ui.buttonActivated(buttons[0..], hs.button_selection)) return .{};
@@ -761,10 +764,17 @@ fn drawHighScores(
 ) void {
     if (runtime_assets) |assets| {
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
-        const right_rect = animatedRightPanelRect(right_panel_rect, timeline_ms);
-        drawSplitPanelShell(assets, timeline_ms);
+        const compact = useCompactSplitPanelLayout(config.screen_width);
+        if (compact) {
+            drawCompactSplitPanelShell(assets, timeline_ms);
+        } else {
+            drawSplitPanelShell(assets, timeline_ms);
+        }
         drawHighScoreMainPanel(state, assets, config, status, left_rect);
-        drawHighScoreRightPanel(state, assets, config, status, preserve_bugs, left_rect, right_rect);
+        if (!compact) {
+            const right_rect = animatedRightPanelRect(right_panel_rect, timeline_ms);
+            drawHighScoreRightPanel(state, assets, config, status, preserve_bugs, left_rect, right_rect);
+        }
         return;
     }
     rl.clearBackground(panel_color);
@@ -780,9 +790,21 @@ fn drawWeapons(
 ) void {
     if (runtime_assets) |assets| {
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
-        const right_rect = animatedRightPanelRect(right_panel_rect, timeline_ms);
-        drawSplitPanelShell(assets, timeline_ms);
-        drawWeaponsPanels(state, assets, config, status, preserve_bugs, left_rect, right_rect);
+        const compact = useCompactSplitPanelLayout(config.screen_width);
+        if (compact) {
+            drawCompactSplitPanelShell(assets, timeline_ms);
+        } else {
+            drawSplitPanelShell(assets, timeline_ms);
+        }
+        drawWeaponsPanels(
+            state,
+            assets,
+            config,
+            status,
+            preserve_bugs,
+            left_rect,
+            if (compact) null else animatedRightPanelRect(right_panel_rect, timeline_ms),
+        );
         return;
     }
     rl.clearBackground(panel_color);
@@ -798,9 +820,23 @@ fn drawPerks(
 ) void {
     if (runtime_assets) |assets| {
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
-        const right_rect = animatedRightPanelRect(right_panel_rect, timeline_ms);
-        drawSplitPanelShell(assets, timeline_ms);
-        drawPerksPanels(state, assets, status, config.gore_disabled, config.hardcore_flag != 0, preserve_bugs, left_rect, right_rect, config.screen_width);
+        const compact = useCompactSplitPanelLayout(config.screen_width);
+        if (compact) {
+            drawCompactSplitPanelShell(assets, timeline_ms);
+        } else {
+            drawSplitPanelShell(assets, timeline_ms);
+        }
+        drawPerksPanels(
+            state,
+            assets,
+            status,
+            config.gore_disabled,
+            config.hardcore_flag != 0,
+            preserve_bugs,
+            left_rect,
+            if (compact) null else animatedRightPanelRect(right_panel_rect, timeline_ms),
+            config.screen_width,
+        );
         return;
     }
     rl.clearBackground(panel_color);
@@ -1025,7 +1061,7 @@ fn drawWeaponsPanels(
     status: formats.game_cfg.Status,
     preserve_bugs: bool,
     left_rect: rl.Rectangle,
-    right_rect: rl.Rectangle,
+    right_rect: ?rl.Rectangle,
 ) void {
     const title = "Unlocked Weapons Database";
     window_ui.drawSmallText(assets, title, left_rect.x + 251.0, left_rect.y + 50.0, text_color);
@@ -1051,18 +1087,19 @@ fn drawWeaponsPanels(
     window_ui.drawButton(back, false, back_hovered, assets);
 
     if (total == 0) return;
+    const details_rect = right_rect orelse return;
     const weapon_id = weapon_ids[@min(state.selection, total - 1)];
-    const detail_x = right_rect.x + weaponsDbRightDetailXShift(config.screen_width);
-    window_ui.drawSmallTextFmt("{s} #{d}", assets, .{ weaponNoLabel(preserve_bugs), @intFromEnum(weapon_id) }, detail_x + 240.0, right_rect.y + 32.0, muted_text);
+    const detail_x = details_rect.x + weaponsDbRightDetailXShift(config.screen_width);
+    window_ui.drawSmallTextFmt("{s} #{d}", assets, .{ weaponNoLabel(preserve_bugs), @intFromEnum(weapon_id) }, detail_x + 240.0, details_rect.y + 32.0, muted_text);
     const name = game_ids.weaponDisplayName(weapon_id, preserve_bugs);
-    window_ui.drawSmallText(assets, name, detail_x + 50.0, right_rect.y + 50.0, text_color);
+    window_ui.drawSmallText(assets, name, detail_x + 50.0, details_rect.y + 50.0, text_color);
     const icon_index = weapon_data.weaponIconIndex(weapon_id);
     if (icon_index >= 0) {
         const src_rect = window_atlas.weaponIconRect(assets.texture(.ui_wicons).width, assets.texture(.ui_wicons).height, icon_index);
         rl.drawTexturePro(
             assets.texture(.ui_wicons),
             rl.Rectangle.init(src_rect.x, src_rect.y, src_rect.width, src_rect.height),
-            rl.Rectangle.init(detail_x + 82.0, right_rect.y + 82.0, 64.0, 32.0),
+            rl.Rectangle.init(detail_x + 82.0, details_rect.y + 82.0, 64.0, 32.0),
             rl.Vector2.zero(),
             0.0,
             rl.Color.white,
@@ -1076,11 +1113,11 @@ fn drawWeaponsPanels(
         std.fmt.bufPrint(&fire_rate_buf, "{s}: n/a", .{fire_rate_label}) catch "Fire rate: ?"
     else
         std.fmt.bufPrint(&fire_rate_buf, "{s}: {d} rpm", .{ fire_rate_label, @as(i32, @intFromFloat(60.0 / stats_entry.shot_cooldown)) }) catch "Fire rate: ?";
-    window_ui.drawSmallText(assets, fire_rate_text, detail_x + 66.0, right_rect.y + 128.0, text_color);
+    window_ui.drawSmallText(assets, fire_rate_text, detail_x + 66.0, details_rect.y + 128.0, text_color);
     var reload_buf: [64]u8 = undefined;
     const reload_text = std.fmt.bufPrint(&reload_buf, "Reload time: {d:.1} secs", .{stats_entry.reload_time}) catch "Reload time: ?";
-    window_ui.drawSmallText(assets, reload_text, detail_x + 66.0, right_rect.y + 146.0, text_color);
-    window_ui.drawSmallTextFmt("Clip size: {d}", assets, .{stats_entry.clip_size}, detail_x + 66.0, right_rect.y + 164.0, text_color);
+    window_ui.drawSmallText(assets, reload_text, detail_x + 66.0, details_rect.y + 146.0, text_color);
+    window_ui.drawSmallTextFmt("Clip size: {d}", assets, .{stats_entry.clip_size}, detail_x + 66.0, details_rect.y + 164.0, text_color);
 }
 
 fn drawPerksPanels(
@@ -1091,7 +1128,7 @@ fn drawPerksPanels(
     hardcore: bool,
     preserve_bugs: bool,
     left_rect: rl.Rectangle,
-    right_rect: rl.Rectangle,
+    right_rect: ?rl.Rectangle,
     screen_width: u32,
 ) void {
     _ = hardcore;
@@ -1126,17 +1163,18 @@ fn drawPerksPanels(
     window_ui.drawButton(back, false, back_hovered, assets);
 
     if (total == 0) return;
+    const details_rect = right_rect orelse return;
     const detail_index = @min(state.hovered orelse state.selection, total - 1);
     const perk_id = perk_ids[detail_index];
-    const detail_x = right_rect.x + 34.0 + perksDbRightDetailXShift(screen_width);
-    window_ui.drawSmallTextFmt("{s} #{d}", assets, .{ perkNoLabel(preserve_bugs), @intFromEnum(perk_id) }, detail_x + 190.0, right_rect.y + 32.0, muted_text);
+    const detail_x = details_rect.x + 34.0 + perksDbRightDetailXShift(screen_width);
+    window_ui.drawSmallTextFmt("{s} #{d}", assets, .{ perkNoLabel(preserve_bugs), @intFromEnum(perk_id) }, detail_x + 190.0, details_rect.y + 32.0, muted_text);
     const name = game_ids.perkDisplayName(perk_id, violence_disabled, preserve_bugs);
     const name_width = window_ui.measureSmallText(assets, name);
     const name_x = detail_x + 128.0 - name_width * 0.5;
-    window_ui.drawSmallText(assets, name, name_x, right_rect.y + 50.0, text_color);
-    drawUnderline(name_x, right_rect.y + 63.0, name_width);
+    window_ui.drawSmallText(assets, name, name_x, details_rect.y + 50.0, text_color);
+    drawUnderline(name_x, details_rect.y + 63.0, name_width);
 
-    var y = right_rect.y + 72.0;
+    var y = details_rect.y + 72.0;
     if (window_statistics_data.perkPrerequisite(perk_id)) |prereq| {
         var req_buf: [128]u8 = undefined;
         const req_text = std.fmt.bufPrint(&req_buf, "Requires: {s}", .{game_ids.perkDisplayName(prereq, violence_disabled, preserve_bugs)}) catch "Requires: ?";
@@ -1164,11 +1202,21 @@ fn animatedRightPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
     return rl.Rectangle.init(fitted.x - anim.offset_x, fitted.y, fitted.width, fitted.height);
 }
 
+fn useCompactSplitPanelLayout(screen_width: u32) bool {
+    return screen_width <= compact_split_screen_width;
+}
+
 fn drawSplitPanelShell(assets: *const window_assets.RuntimeAssets, timeline_ms: i32) void {
     window_menu.drawMenuBackdrop(assets);
     window_menu.drawSign(timeline_ms, assets);
     window_ui.drawClassicMenuPanel(assets.texture(.ui_menu_panel), animatedLeftPanelRect(left_panel_rect, timeline_ms), rl.Color.white, false);
     window_ui.drawClassicMenuPanel(assets.texture(.ui_menu_panel), animatedRightPanelRect(right_panel_rect, timeline_ms), rl.Color.white, true);
+}
+
+fn drawCompactSplitPanelShell(assets: *const window_assets.RuntimeAssets, timeline_ms: i32) void {
+    window_menu.drawMenuBackdrop(assets);
+    window_menu.drawSign(timeline_ms, assets);
+    window_ui.drawClassicMenuPanel(assets.texture(.ui_menu_panel), animatedLeftPanelRect(left_panel_rect, timeline_ms), rl.Color.white, false);
 }
 
 fn drawPanelShell(timeline_ms: i32, assets: *const window_assets.RuntimeAssets, rect: rl.Rectangle, label_row: i32) void {
@@ -2516,6 +2564,10 @@ test "statistics child timeline gates input and dispatches after close" {
 }
 
 test "statistics right panel shifts match narrow native layouts" {
+    try std.testing.expect(useCompactSplitPanelLayout(640));
+    try std.testing.expect(useCompactSplitPanelLayout(768));
+    try std.testing.expect(!useCompactSplitPanelLayout(769));
+
     try std.testing.expectEqual(@as(f32, 0.0), highScoreRightOptionsXShift(1024));
     try std.testing.expectEqual(@as(f32, 10.0), highScoreRightOptionsXShift(640));
     try std.testing.expectEqual(@as(f32, 0.0), highScoreRightLocalCardXShift(1024));

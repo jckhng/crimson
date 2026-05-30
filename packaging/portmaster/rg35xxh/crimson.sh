@@ -20,6 +20,8 @@ GAMEDIR=/$directory/ports/crimson/
 RUNTIME_DIR="$GAMEDIR/runtime"
 ASSETS_DIR="$GAMEDIR/assets"
 BIN="$GAMEDIR/crimson.${DEVICE_ARCH}"
+DISPLAY_W="${DISPLAY_WIDTH:-640}"
+DISPLAY_H="${DISPLAY_HEIGHT:-480}"
 
 mkdir -p "$RUNTIME_DIR" "$RUNTIME_DIR/home" "$ASSETS_DIR"
 
@@ -43,8 +45,8 @@ pm_platform_helper "$BIN"
 "$BIN" \
     --runtime-dir "$RUNTIME_DIR" \
     --assets-dir "$ASSETS_DIR" \
-    --width 640 \
-    --height 480 \
+    --width "$DISPLAY_W" \
+    --height "$DISPLAY_H" \
     --fullscreen
 
 pm_finish

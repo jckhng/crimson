@@ -3,7 +3,7 @@ start = enter
 
 a = enter
 b = esc
-x = mouse_right
+x = backspace
 y = mouse_middle
 
 l1 = q

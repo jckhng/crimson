@@ -91,8 +91,8 @@ Copy `artifacts/portmaster/Crimson-rg35xxh-zig-portmaster.zip` to the device.
 ./crimson.aarch64 \
   --runtime-dir ./crimson/runtime \
   --assets-dir ./crimson/assets \
-  --width 640 \
-  --height 480 \
+  --width "$DISPLAY_WIDTH" \
+  --height "$DISPLAY_HEIGHT" \
   --fullscreen
 ```
 
@@ -106,8 +106,9 @@ Behavior:
 - Hides Crimson's custom UI cursor when `CRIMSON_HIDE_UI_CURSOR=1`.
 - Starts `gptokeyb` with `crimson.gptk` by default for keyboard/menu fallback
   controls. Gameplay aiming uses native raylib gamepad axes instead of mouse
-  cursor emulation. Set `CRIMSON_USE_GPTOKEYB=0` to test native raylib gamepad
-  input only.
+  cursor emulation. X sends Backspace for high-score name entry.
+- Falls back to 640x480 only when PortMaster does not provide
+  `DISPLAY_WIDTH`/`DISPLAY_HEIGHT`.
 
 ## Validation checklist
 
@@ -141,6 +142,9 @@ Known handheld-specific rules:
 
 - Avoid raw desktop anchors for panels wider than the device; clamp to
   `window_ui.fitRectToScreen` or a screen-aware layout helper.
+- Statistics, weapon, and perk database views use a compact single-panel layout
+  at 768px wide and below so the old right-hand detail panel cannot overlap the
+  list on 640x480 devices.
 - Keep B/Escape as an in-app cancel/back action, not raylib's process exit key.
 - If a text-entry prompt cannot accept controller text input, B/Escape must
   leave the prompt without trapping the player.
