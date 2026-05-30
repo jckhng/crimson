@@ -17,6 +17,8 @@ pub const computer_move_target_radius: f32 = 300.0;
 pub const computer_aim_snap_distance: f32 = 4.0;
 pub const computer_aim_track_gain: f32 = 6.0;
 pub const computer_auto_fire_distance: f32 = 128.0;
+pub const dual_action_auto_fire_threshold: f32 = 0.35;
+const dual_action_auto_fire_threshold_sq: f32 = dual_action_auto_fire_threshold * dual_action_auto_fire_threshold;
 
 pub const movement_control_unknown: i32 = 0;
 pub const movement_control_relative: i32 = 1;
@@ -141,8 +143,8 @@ pub const LocalInputInterpreter = struct {
                 .y = boolToFloat(moveBackwardPressed(move_backward_pressed)) - boolToFloat(moveForwardPressed(move_forward_pressed)),
             };
         } else if (move_mode_type == movement_control_dual_action_pad) {
-            const axis_y = -sampler.axisValue(move_axis_y, @intCast(idx));
-            const axis_x = -sampler.axisValue(move_axis_x, @intCast(idx));
+            const axis_y = sampler.axisValue(move_axis_y, @intCast(idx));
+            const axis_x = sampler.axisValue(move_axis_x, @intCast(idx));
             move_vec = .{
                 .x = clampUnit(axis_x),
                 .y = clampUnit(axis_y),
@@ -284,7 +286,7 @@ pub const LocalInputInterpreter = struct {
                 .x = sampler.axisValue(aim_axis_x, @intCast(idx)),
                 .y = sampler.axisValue(aim_axis_y, @intCast(idx)),
             };
-            fire_down = fire_down or lengthSq(axis_vec) > 1e-9;
+            fire_down = fire_down or lengthSq(axis_vec) >= dual_action_auto_fire_threshold_sq;
         }
         const reload_pressed = sampler.codeIsPressed(reload_key, @intCast(idx));
         const reload_down = sampler.codeIsDown(reload_key, @intCast(idx));
@@ -823,6 +825,33 @@ test "dual action pad aim uses native radius scale" {
     try expectFloatClose(100.0, out.aim_y);
 }
 
+test "dual action pad move uses native raylib axis direction" {
+    var interpreter: LocalInputInterpreter = .{};
+    const player = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 160.0, .y = 100.0 }, 0.0);
+    var cfg = formats.crimson_cfg.defaultConfig();
+    cfg.player_mode_flag_p1 = @intCast(movement_control_dual_action_pad);
+
+    const binds = formats.crimson_cfg.playerBindBlock(&cfg, 0);
+    const out = interpreter.buildPlayerInput(
+        .{ .axes = &.{
+            .{ .player_index = 0, .code = binds.axis_move_x, .value = 1.0 },
+            .{ .player_index = 0, .code = binds.axis_move_y, .value = 1.0 },
+        } },
+        0,
+        1,
+        &player,
+        &cfg,
+        .{},
+        .{},
+        .{},
+        0.1,
+        &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{},
+    );
+
+    try expectFloatClose(1.0, out.move_x);
+    try expectFloatClose(1.0, out.move_y);
+}
+
 test "dual action pad auto fire shoots while aiming" {
     var interpreter: LocalInputInterpreter = .{};
     const player = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 160.0, .y = 100.0 }, 0.0);
@@ -847,6 +876,30 @@ test "dual action pad auto fire shoots while aiming" {
     try std.testing.expect(!out.flags.fire_pressed);
     try expectFloatClose(238.0, out.aim_x);
     try expectFloatClose(100.0, out.aim_y);
+}
+
+test "dual action pad auto fire ignores small aim drift" {
+    var interpreter: LocalInputInterpreter = .{};
+    const player = makePlayer(0, .{ .x = 100.0, .y = 100.0 }, .{ .x = 160.0, .y = 100.0 }, 0.0);
+    var cfg = formats.crimson_cfg.defaultConfig();
+    cfg.aim_scheme_p1 = @bitCast(@as(i32, aim_scheme_dual_action_pad_auto_fire));
+
+    const binds = formats.crimson_cfg.playerBindBlock(&cfg, 0);
+    const out = interpreter.buildPlayerInput(
+        .{ .axes = &.{.{ .player_index = 0, .code = binds.axis_aim_x, .value = dual_action_auto_fire_threshold * 0.5 }} },
+        0,
+        1,
+        &player,
+        &cfg,
+        .{},
+        .{},
+        .{},
+        0.1,
+        &[_]struct { active: bool, hp: f32, pos: state_mod.Vec2 }{},
+    );
+
+    try std.testing.expect(!out.flags.fire_down);
+    try std.testing.expect(!out.flags.fire_pressed);
 }
 
 test "keyboard aim in static mode reanchors to heading" {
