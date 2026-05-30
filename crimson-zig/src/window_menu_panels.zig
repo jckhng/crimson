@@ -159,8 +159,11 @@ pub fn updatePlayGame(state: *PlayGameState, frame_dt: f32, config: *formats.cri
 
     const entries = playGameEntries(config, status, demo_enabled);
     const layout = playGameLayout(config, status, state.panel.timeline_ms, demo_enabled);
+    if (state.panel.selection >= entries.len) state.panel.selection = entries.len - 1;
     const hovered = hoveredPlayGameEntry(entries[0..], layout);
-    updatePlayGameTooltipTimers(state, entries[0..], hovered, dt_ms);
+    if (hovered) |hovered_idx| state.panel.selection = hovered_idx;
+    const focused = hovered orelse state.panel.selection;
+    updatePlayGameTooltipTimers(state, entries[0..], focused, dt_ms);
     const back_hovered = if (runtime_assets) |assets|
         state.panel.timeline_ms >= panel_timeline_max_ms and rl.checkCollisionPointRec(rl.getMousePosition(), window_menu.panelBackHitRect(assets, state.panel.timeline_ms))
     else
@@ -181,6 +184,24 @@ pub fn updatePlayGame(state: *PlayGameState, frame_dt: f32, config: *formats.cri
     if (back_hovered and rl.isMouseButtonPressed(.left)) {
         beginClosePlayGame(state, .back_to_menu);
         return .{ .play_button_click = true };
+    }
+
+    if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w) or rl.isKeyPressed(.left) or rl.isKeyPressed(.a)) {
+        state.panel.selection = if (state.panel.selection == 0) entries.len - 1 else state.panel.selection - 1;
+        return .{ .play_button_click = true };
+    }
+    if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s) or rl.isKeyPressed(.right) or rl.isKeyPressed(.d)) {
+        state.panel.selection = (state.panel.selection + 1) % entries.len;
+        return .{ .play_button_click = true };
+    }
+
+    if (window_ui.confirmPressed()) {
+        const entry = entries[state.panel.selection];
+        beginClosePlayGame(state, entry.action);
+        return .{
+            .play_button_click = true,
+            .config_dirty = if (entry.game_mode) |mode| setConfigGameMode(config, mode) else false,
+        };
     }
 
     if (hovered) |hovered_idx| {
@@ -258,10 +279,11 @@ fn drawPlayGameContent(state: *const PlayGameState, runtime_assets: *const windo
     }
 
     var y = layout.base_pos.y + layout.y_start;
-    for (entries) |entry| {
+    for (entries, 0..) |entry, idx| {
         const button = playGameButton(entry.label, layout.base_pos.x, y);
         const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), button.rect);
-        window_ui.drawButton(button, false, hovered, runtime_assets);
+        const selected = idx == state.panel.selection;
+        window_ui.drawButton(button, selected, hovered, runtime_assets);
         if (show_counts and entry.show_count) {
             window_ui.drawSmallTextFmt("{d}", runtime_assets, .{playGameCount(entry.key, status)}, layout.count_x, y + 8.0, if (hovered) text_color else muted_text);
         }
