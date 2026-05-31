@@ -24,6 +24,8 @@ __pycache__/
 coverage.xml
 htmlcov/
 screenshots/
+/build/
+muOS_*.png
 zig-cache/
 .zig-cache/
 .zig-cache-global/
