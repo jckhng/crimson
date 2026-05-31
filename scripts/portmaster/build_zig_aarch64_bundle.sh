@@ -114,8 +114,16 @@ fi
 
 (
     cd "$STAGE_DIR"
-    rm -f "$OUT_DIR/Crimson-rg35xxh-zig-portmaster.zip"
-    zip -r "$OUT_DIR/Crimson-rg35xxh-zig-portmaster.zip" crimson.sh crimson >/dev/null
+    ZIP_PATH="$OUT_DIR/Crimson-rg35xxh-zig-portmaster.zip"
+    rm -f "$ZIP_PATH"
+    if command -v zip >/dev/null 2>&1; then
+        zip -r "$ZIP_PATH" crimson.sh crimson >/dev/null
+    elif command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -a -cf "$ZIP_PATH" crimson.sh crimson
+    else
+        echo "Need zip or bsdtar to create PortMaster archive" >&2
+        exit 1
+    fi
 )
 
 echo "Built: $OUT_DIR/Crimson-rg35xxh-zig-portmaster.zip"
