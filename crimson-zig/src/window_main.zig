@@ -3049,6 +3049,7 @@ const App = struct {
                     const summary_value_x = layout.top_left.x + 248.0;
                     const breakdown_label_x = layout.top_left.x + 318.0;
                     const breakdown_value_x = layout.top_left.x + 434.0;
+                    const draw_side_summary = resultsDrawSideSummary(&results, screen_width);
 
                     drawTextureFit(runtime_assets.texture(.ui_menu_panel), panel_rect, colorWithAlpha(rl.Color.white, 0.96));
                     switch (results.reason) {
@@ -3065,40 +3066,42 @@ const App = struct {
                         .abandoned, .runtime_error => drawSmallTextCenteredAtX(runtime_assets, resultsTitle(results.reason), center_x, layout.top_left.y + 123.0, HudTextColor.accent),
                     }
                     drawSmallTextCenteredAtX(runtime_assets, resultsSubtitleFor(&results), center_x, layout.top_left.y + 167.0, HudTextColor.primary);
-                    drawSmallText(runtime_assets, "TIME", summary_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "XP", summary_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "LEVEL", summary_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "WEAPON", summary_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
-                    drawSmallText(runtime_assets, "HP", summary_label_x, layout.top_left.y + 341.0, HudTextColor.dim);
-                    const elapsed_ms = if (results.quest_final_time != null)
-                        questResultsDisplayBreakdown(&results).final_time_ms
-                    else
-                        @as(i32, @intCast(results.summary.elapsed_ms_sim));
-                    var elapsed_buf: [16]u8 = undefined;
-                    drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&elapsed_buf, elapsed_ms), summary_value_x, layout.top_left.y + 229.0, HudTextColor.primary);
-                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_experience}, summary_value_x, layout.top_left.y + 257.0, HudTextColor.primary);
-                    drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_level}, summary_value_x, layout.top_left.y + 285.0, HudTextColor.primary);
-                    drawSmallText(runtime_assets, weaponName(results.summary.player_weapon_id, results.run_config.preserve_bugs), summary_value_x, layout.top_left.y + 313.0, HudTextColor.primary);
-                    const player_health = if (results.player_health_count > 0) results.player_health_values[0] else 0.0;
-                    drawSmallTextFmt("{d:.1}", runtime_assets, .{player_health}, summary_value_x, layout.top_left.y + 341.0, HudTextColor.primary);
-                    if (results.quest_final_time != null) {
-                        const breakdown = questResultsDisplayBreakdown(&results);
-                        const base_color = questResultsBreakdownRowColor(&results, 0, false);
-                        const life_color = questResultsBreakdownRowColor(&results, 1, false);
-                        const perk_color = questResultsBreakdownRowColor(&results, 2, false);
-                        const final_color = questResultsBreakdownRowColor(&results, 3, true);
-                        drawSmallText(runtime_assets, "BASE", breakdown_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "LIFE BONUS", breakdown_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "PERK BONUS", breakdown_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
-                        drawSmallText(runtime_assets, "FINAL", breakdown_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
-                        var base_buf: [16]u8 = undefined;
-                        var life_buf: [16]u8 = undefined;
-                        var perk_buf: [16]u8 = undefined;
-                        var final_buf: [16]u8 = undefined;
-                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&base_buf, breakdown.base_time_ms), breakdown_value_x, layout.top_left.y + 229.0, base_color);
-                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&life_buf, breakdown.life_bonus_ms)}, breakdown_value_x, layout.top_left.y + 257.0, life_color);
-                        drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&perk_buf, breakdown.unpicked_perk_bonus_ms)}, breakdown_value_x, layout.top_left.y + 285.0, perk_color);
-                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), breakdown_value_x, layout.top_left.y + 313.0, final_color);
+                    if (draw_side_summary) {
+                        drawSmallText(runtime_assets, "TIME", summary_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "XP", summary_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "LEVEL", summary_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "WEAPON", summary_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
+                        drawSmallText(runtime_assets, "HP", summary_label_x, layout.top_left.y + 341.0, HudTextColor.dim);
+                        const elapsed_ms = if (results.quest_final_time != null)
+                            questResultsDisplayBreakdown(&results).final_time_ms
+                        else
+                            @as(i32, @intCast(results.summary.elapsed_ms_sim));
+                        var elapsed_buf: [16]u8 = undefined;
+                        drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&elapsed_buf, elapsed_ms), summary_value_x, layout.top_left.y + 229.0, HudTextColor.primary);
+                        drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_experience}, summary_value_x, layout.top_left.y + 257.0, HudTextColor.primary);
+                        drawSmallTextFmt("{d}", runtime_assets, .{results.summary.player_level}, summary_value_x, layout.top_left.y + 285.0, HudTextColor.primary);
+                        drawSmallText(runtime_assets, weaponName(results.summary.player_weapon_id, results.run_config.preserve_bugs), summary_value_x, layout.top_left.y + 313.0, HudTextColor.primary);
+                        const player_health = if (results.player_health_count > 0) results.player_health_values[0] else 0.0;
+                        drawSmallTextFmt("{d:.1}", runtime_assets, .{player_health}, summary_value_x, layout.top_left.y + 341.0, HudTextColor.primary);
+                        if (results.quest_final_time != null) {
+                            const breakdown = questResultsDisplayBreakdown(&results);
+                            const base_color = questResultsBreakdownRowColor(&results, 0, false);
+                            const life_color = questResultsBreakdownRowColor(&results, 1, false);
+                            const perk_color = questResultsBreakdownRowColor(&results, 2, false);
+                            const final_color = questResultsBreakdownRowColor(&results, 3, true);
+                            drawSmallText(runtime_assets, "BASE", breakdown_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
+                            drawSmallText(runtime_assets, "LIFE BONUS", breakdown_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
+                            drawSmallText(runtime_assets, "PERK BONUS", breakdown_label_x, layout.top_left.y + 285.0, HudTextColor.dim);
+                            drawSmallText(runtime_assets, "FINAL", breakdown_label_x, layout.top_left.y + 313.0, HudTextColor.dim);
+                            var base_buf: [16]u8 = undefined;
+                            var life_buf: [16]u8 = undefined;
+                            var perk_buf: [16]u8 = undefined;
+                            var final_buf: [16]u8 = undefined;
+                            drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&base_buf, breakdown.base_time_ms), breakdown_value_x, layout.top_left.y + 229.0, base_color);
+                            drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&life_buf, breakdown.life_bonus_ms)}, breakdown_value_x, layout.top_left.y + 257.0, life_color);
+                            drawSmallTextFmt("-{s}", runtime_assets, .{ui_formatting.formatTimeMmSs(&perk_buf, breakdown.unpicked_perk_bonus_ms)}, breakdown_value_x, layout.top_left.y + 285.0, perk_color);
+                            drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), breakdown_value_x, layout.top_left.y + 313.0, final_color);
+                        }
                     }
                     if (!questResultsBreakdownPending(&results)) {
                         drawQuestUnlockResults(runtime_assets, &results);
@@ -4103,6 +4106,12 @@ fn resultsVisibleScoreCard(results: *const ResultsScreen, screen_width: f32) ?Re
         };
     }
     return null;
+}
+
+fn resultsDrawSideSummary(results: *const ResultsScreen, screen_width: f32) bool {
+    if (isQuestCompletedResult(results)) return true;
+    if (screen_width > 768.0) return true;
+    return resultsVisibleScoreCard(results, screen_width) == null;
 }
 
 fn resultsScoreCardHoverRects(pos: rl.Vector2) ResultsScoreCardHoverRects {
@@ -5656,6 +5665,35 @@ test "game over score too low message uses native banner anchor" {
 
     var rank_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("101st", resultsScoreCardRankText(&results, persistence.highscores.table_max, &rank_buf));
+}
+
+test "compact game over result hides side summary when score card is visible" {
+    const compact_results: ResultsScreen = .{
+        .reason = .dead,
+        .run_config = .{ .game_mode = .survival },
+        .summary = undefined,
+        .score_too_low_for_top100 = true,
+        .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
+    };
+    try std.testing.expect(!resultsDrawSideSummary(&compact_results, 640.0));
+    try std.testing.expect(!resultsDrawSideSummary(&compact_results, 768.0));
+    try std.testing.expect(resultsDrawSideSummary(&compact_results, 769.0));
+
+    const no_score_card_results: ResultsScreen = .{
+        .reason = .dead,
+        .run_config = .{ .game_mode = .survival },
+        .summary = undefined,
+    };
+    try std.testing.expect(resultsDrawSideSummary(&no_score_card_results, 640.0));
+
+    const quest_completed_results: ResultsScreen = .{
+        .reason = .completed,
+        .run_config = .{ .game_mode = .quests },
+        .summary = undefined,
+        .score_too_low_for_top100 = true,
+        .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
+    };
+    try std.testing.expect(resultsDrawSideSummary(&quest_completed_results, 640.0));
 }
 
 test "quest results high score prompt uses native ok submit button" {
