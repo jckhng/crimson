@@ -3065,7 +3065,13 @@ const App = struct {
                         ),
                         .abandoned, .runtime_error => drawSmallTextCenteredAtX(runtime_assets, resultsTitle(results.reason), center_x, layout.top_left.y + 123.0, HudTextColor.accent),
                     }
-                    drawSmallTextCenteredAtX(runtime_assets, resultsSubtitleFor(&results), center_x, layout.top_left.y + 167.0, HudTextColor.primary);
+                    drawSmallTextCenteredAtX(
+                        runtime_assets,
+                        resultsSubtitleFor(&results),
+                        center_x,
+                        resultsSubtitleYForTimeline(&results, screen_width, results.timeline_ms),
+                        HudTextColor.primary,
+                    );
                     if (draw_side_summary) {
                         drawSmallText(runtime_assets, "TIME", summary_label_x, layout.top_left.y + 229.0, HudTextColor.dim);
                         drawSmallText(runtime_assets, "XP", summary_label_x, layout.top_left.y + 257.0, HudTextColor.dim);
@@ -4194,6 +4200,18 @@ fn resultsScoreTooLowMessagePosForTimeline(results: *const ResultsScreen, screen
     }
     const layout = gameOverResultsPanelLayoutForTimeline(screen_width, timeline_ms);
     return rl.Vector2.init(layout.banner_pos.x + 38.0, layout.banner_pos.y + 62.0);
+}
+
+fn resultsSubtitleY(results: *const ResultsScreen, screen_width: f32) f32 {
+    return resultsSubtitleYForTimeline(results, screen_width, resultsTimelineMaxMs(results));
+}
+
+fn resultsSubtitleYForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) f32 {
+    const layout = resultsPanelLayoutForTimeline(results, screen_width, timeline_ms);
+    if (!isQuestCompletedResult(results) and screen_width <= 768.0 and resultsVisibleScoreCard(results, screen_width) != null) {
+        return layout.banner_pos.y + 56.0;
+    }
+    return layout.top_left.y + 167.0;
 }
 
 fn isQuestFailedResult(results: *const ResultsScreen) bool {
@@ -5694,6 +5712,26 @@ test "compact game over result hides side summary when score card is visible" {
         .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
     };
     try std.testing.expect(resultsDrawSideSummary(&quest_completed_results, 640.0));
+}
+
+test "compact game over result moves subtitle above visible score card" {
+    const compact_results: ResultsScreen = .{
+        .reason = .dead,
+        .run_config = .{ .game_mode = .survival },
+        .summary = undefined,
+        .score_too_low_for_top100 = true,
+        .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
+    };
+    try std.testing.expectApproxEqAbs(@as(f32, 125.0), resultsSubtitleY(&compact_results, 640.0), 1e-6);
+    const wide_layout = gameOverResultsPanelLayout(769.0);
+    try std.testing.expectApproxEqAbs(wide_layout.top_left.y + 167.0, resultsSubtitleY(&compact_results, 769.0), 1e-6);
+
+    const no_score_card_results: ResultsScreen = .{
+        .reason = .dead,
+        .run_config = .{ .game_mode = .survival },
+        .summary = undefined,
+    };
+    try std.testing.expectApproxEqAbs(@as(f32, 196.0), resultsSubtitleY(&no_score_card_results, 640.0), 1e-6);
 }
 
 test "quest results high score prompt uses native ok submit button" {
