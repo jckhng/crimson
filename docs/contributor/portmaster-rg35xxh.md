@@ -106,7 +106,8 @@ Behavior:
 - Hides Crimson's custom UI cursor when `CRIMSON_HIDE_UI_CURSOR=1`.
 - Starts `gptokeyb` with `crimson.gptk` by default for keyboard/menu fallback
   controls. Gameplay aiming uses native raylib gamepad axes instead of mouse
-  cursor emulation. X sends Backspace for high-score name entry.
+  cursor emulation. Y opens perk picking, L1/L2 reload, and X sends Backspace
+  for high-score name entry.
 - Falls back to 640x480 only when PortMaster does not provide
   `DISPLAY_WIDTH`/`DISPLAY_HEIGHT`.
 

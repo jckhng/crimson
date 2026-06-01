@@ -4,10 +4,10 @@ start = enter
 a = enter
 b = esc
 x = backspace
-y = mouse_middle
+y = mouse_right
 
-l1 = q
-l2 = q
+l1 = mouse_middle
+l2 = mouse_middle
 
 r1 = mouse_left
 r2 = mouse_left
