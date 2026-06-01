@@ -79,7 +79,8 @@ The package script auto-detects the generated `libraylib.so` under
 `crimson-zig/.zig-cache/o`. Pass `--lib-dir` only if you need to override that.
 Use `--assets-dir` only for local device testing. Public release zips should not
 include `crimson.paq`, `music.paq`, or `sfx.paq`; users must provide their own
-archives.
+archives. The native PortMaster build tolerates a missing `music.paq`; music is
+disabled while SFX remains available when `sfx.paq` exists.
 
 Copy `artifacts/portmaster/Crimson-rg35xxh-zig-portmaster.zip` to the device.
 
@@ -99,7 +100,7 @@ Copy `artifacts/portmaster/Crimson-rg35xxh-zig-portmaster.zip` to the device.
 Behavior:
 
 - Writes runtime files to `crimson/runtime/`.
-- Loads original archives from `crimson/assets/`.
+- Loads original archives from `crimson/assets/`; `music.paq` is optional.
 - Uses PortMaster `runtime=blank`, `arch=aarch64`.
 - Seeds new configs with PortMaster controls when `CRIMSON_PORTMASTER_CONTROLS=1`:
   left stick moves, right stick aims, and pushing the right stick fires.

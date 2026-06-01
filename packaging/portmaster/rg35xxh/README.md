@@ -4,12 +4,13 @@ This template is staged by `scripts/portmaster/build_zig_aarch64_bundle.sh`.
 It is intended for the downstream PortMaster branch/fork, not as a
 parity-preserving upstream package.
 
-Copy the original game archives into `crimson/assets/` before launching. For
+Copy the original game archives into `crimson/assets/` before launching. The
+native PortMaster build can run without music; `music.paq` is optional. For
 local testing only, pass `--assets-dir` to the package script:
 
 - `crimson.paq`
-- `music.paq`
 - `sfx.paq`
+- `music.paq` (optional)
 
 Runtime files are written under `crimson/runtime/`.
 

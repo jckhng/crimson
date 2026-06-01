@@ -26,6 +26,8 @@ htmlcov/
 screenshots/
 /build/
 muOS_*.png
+Crimson-rg35xxh-zig-portmaster/
+Crimson-rg35xxh-zig-portmaster.zip
 zig-cache/
 .zig-cache/
 .zig-cache-global/
