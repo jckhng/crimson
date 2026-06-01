@@ -23,6 +23,9 @@ pub fn centeredRect(center_x: f32, top_y: f32, width: f32, height: f32) rl.Recta
 }
 
 pub fn updateSelectionFromPointer(selection: *usize, buttons: []const UiButton) void {
+    const mouse_delta = rl.getMouseDelta();
+    if (mouse_delta.x == 0.0 and mouse_delta.y == 0.0 and !rl.isMouseButtonPressed(.left)) return;
+
     const mouse = rl.getMousePosition();
     for (buttons, 0..) |button, idx| {
         if (rl.checkCollisionPointRec(mouse, buttonHitRect(button))) {

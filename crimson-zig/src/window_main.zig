@@ -3109,7 +3109,7 @@ const App = struct {
                             drawSmallText(runtime_assets, ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), breakdown_value_x, layout.top_left.y + 313.0, final_color);
                         }
                     }
-                    if (!questResultsBreakdownPending(&results)) {
+                    if (!questResultsBreakdownPending(&results) and !resultsUsesCompactScoreOverlay(&results, screen_width)) {
                         drawQuestUnlockResults(runtime_assets, &results);
                     }
                 }
@@ -3118,6 +3118,9 @@ const App = struct {
                 if (results.runtime_error) |runtime_error| {
                     const layout = resultsPanelLayoutForTimeline(&results, screen_width, results.timeline_ms);
                     drawSmallText(runtime_assets, runtime_error, layout.top_left.x + 222.0, layout.top_left.y + 314.0, rl.Color.orange);
+                }
+                if (!breakdown_pending and resultsUsesCompactScoreOverlay(&results, screen_width)) {
+                    drawResultsCompactScoreOverlay(&results, screen_width);
                 }
                 if (!breakdown_pending and results.highscore != null) {
                     const highscore = results.highscore.?;
@@ -4114,10 +4117,50 @@ fn resultsVisibleScoreCard(results: *const ResultsScreen, screen_width: f32) ?Re
     return null;
 }
 
+fn resultsUsesCompactScoreOverlay(results: *const ResultsScreen, screen_width: f32) bool {
+    if (screen_width > 768.0) return false;
+    return resultsVisibleScoreCard(results, screen_width) != null;
+}
+
 fn resultsDrawSideSummary(results: *const ResultsScreen, screen_width: f32) bool {
+    if (resultsUsesCompactScoreOverlay(results, screen_width)) return false;
     if (isQuestCompletedResult(results)) return true;
     if (screen_width > 768.0) return true;
     return resultsVisibleScoreCard(results, screen_width) == null;
+}
+
+fn resultsCompactScoreOverlayRect(results: *const ResultsScreen, screen_width: f32) rl.Rectangle {
+    return resultsCompactScoreOverlayRectForTimeline(
+        results,
+        screen_width,
+        @floatFromInt(rl.getScreenHeight()),
+        resultsTimelineMaxMs(results),
+    );
+}
+
+fn resultsCompactScoreOverlayRectForTimeline(
+    results: *const ResultsScreen,
+    screen_width: f32,
+    screen_height: f32,
+    timeline_ms: i32,
+) rl.Rectangle {
+    const layout = resultsPanelLayoutForTimeline(results, screen_width, timeline_ms);
+    const left = @max(@as(f32, 0.0), layout.top_left.x + 206.0);
+    const top = @max(@as(f32, 0.0), layout.top_left.y + 84.0);
+    const right = @min(screen_width, layout.top_left.x + quest_failed_panel_w - 38.0);
+    const bottom = @min(screen_height, layout.top_left.y + quest_failed_panel_h - 24.0);
+    return rl.Rectangle.init(left, top, @max(@as(f32, 1.0), right - left), @max(@as(f32, 1.0), bottom - top));
+}
+
+fn drawResultsCompactScoreOverlay(results: *const ResultsScreen, screen_width: f32) void {
+    const rect = resultsCompactScoreOverlayRectForTimeline(
+        results,
+        screen_width,
+        @floatFromInt(rl.getScreenHeight()),
+        results.timeline_ms,
+    );
+    rl.drawRectangleRec(rect, rl.Color.init(2, 2, 4, 238));
+    rl.drawRectangleLinesEx(rect, 1.0, colorWithAlpha(rl.Color.init(149, 175, 198, 255), 0.45));
 }
 
 fn resultsScoreCardHoverRects(pos: rl.Vector2) ResultsScoreCardHoverRects {
@@ -4224,9 +4267,10 @@ fn isQuestCompletedResult(results: *const ResultsScreen) bool {
 
 fn questCompletedShortcutSelection(results: *const ResultsScreen) ?usize {
     if (!isQuestCompletedResult(results)) return null;
+    const portmaster_controls = envFlagEnabled("CRIMSON_PORTMASTER_CONTROLS");
     return questCompletedShortcutSelectionFor(
         rl.isKeyPressed(.escape),
-        rl.isKeyPressed(.enter) or rl.isKeyPressed(.kp_enter),
+        !portmaster_controls and (rl.isKeyPressed(.enter) or rl.isKeyPressed(.kp_enter)),
         rl.isKeyPressed(.n),
         rl.isKeyPressed(.h),
     );
@@ -4253,7 +4297,7 @@ fn questFailedShortcutSelection(results: *const ResultsScreen) ?usize {
     if (!isQuestFailedResult(results)) return null;
     if (rl.isKeyPressed(.escape)) return 2;
     if (rl.isKeyPressed(.q)) return 1;
-    if (rl.isKeyPressed(.enter) or rl.isKeyPressed(.kp_enter)) return 0;
+    if (!envFlagEnabled("CRIMSON_PORTMASTER_CONTROLS") and (rl.isKeyPressed(.enter) or rl.isKeyPressed(.kp_enter))) return 0;
     return null;
 }
 
@@ -5711,7 +5755,27 @@ test "compact game over result hides side summary when score card is visible" {
         .score_too_low_for_top100 = true,
         .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
     };
-    try std.testing.expect(resultsDrawSideSummary(&quest_completed_results, 640.0));
+    try std.testing.expect(!resultsDrawSideSummary(&quest_completed_results, 640.0));
+    try std.testing.expect(resultsDrawSideSummary(&quest_completed_results, 769.0));
+    try std.testing.expect(resultsUsesCompactScoreOverlay(&quest_completed_results, 640.0));
+    try std.testing.expect(!resultsUsesCompactScoreOverlay(&quest_completed_results, 769.0));
+}
+
+test "compact score overlay covers high score content area" {
+    const results: ResultsScreen = .{
+        .reason = .dead,
+        .run_config = .{ .game_mode = .survival },
+        .summary = undefined,
+        .score_too_low_for_top100 = true,
+        .score_too_low_record = persistence.highscores.HighScoreRecord.blank(),
+    };
+    const rect = resultsCompactScoreOverlayRectForTimeline(&results, 640.0, 480.0, resultsTimelineMaxMs(&results));
+    const score_card = resultsSavedScoreCardPos(&results, 640.0);
+
+    try std.testing.expect(score_card.x >= rect.x);
+    try std.testing.expect(score_card.y >= rect.y);
+    try std.testing.expect(score_card.x + 190.0 <= rect.x + rect.width);
+    try std.testing.expect(score_card.y + 100.0 <= rect.y + rect.height);
 }
 
 test "compact game over result moves subtitle above visible score card" {
