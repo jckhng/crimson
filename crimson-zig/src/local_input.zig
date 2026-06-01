@@ -42,6 +42,14 @@ const alt_move_key_left: i32 = 0xCB;
 const alt_move_key_right: i32 = 0xCD;
 const aim_pov_left_code: i32 = 0x133;
 const aim_pov_right_code: i32 = 0x134;
+const key_r_code: i32 = 0x13;
+const gamepad_left_trigger_1_code: i32 = 0x127;
+const gamepad_left_trigger_2_code: i32 = 0x129;
+const portmaster_reload_codes = [_]i32{
+    key_r_code,
+    gamepad_left_trigger_1_code,
+    gamepad_left_trigger_2_code,
+};
 
 pub const PerPlayerInputState = struct {
     aim_heading: f32 = 0.0,
@@ -295,8 +303,12 @@ pub const LocalInputInterpreter = struct {
             };
             fire_down = fire_down or lengthSq(axis_vec) >= dual_action_auto_fire_threshold_sq;
         }
-        const reload_pressed = sampler.codeIsPressed(reload_key, @intCast(idx));
-        const reload_down = sampler.codeIsDown(reload_key, @intCast(idx));
+        var reload_pressed = sampler.codeIsPressed(reload_key, @intCast(idx));
+        var reload_down = sampler.codeIsDown(reload_key, @intCast(idx));
+        if (portmasterControlsEnabled() and idx == 0) {
+            reload_pressed = reload_pressed or portmasterReloadPressed(sampler, @intCast(idx));
+            reload_down = reload_down or portmasterReloadDown(sampler, @intCast(idx));
+        }
 
         return .{
             .move_x = move_vec.x,
@@ -374,6 +386,26 @@ pub const LocalInputInterpreter = struct {
         return current;
     }
 };
+
+fn portmasterControlsEnabled() bool {
+    const raw = std.c.getenv("CRIMSON_PORTMASTER_CONTROLS") orelse return false;
+    const value = std.mem.span(raw);
+    return value.len != 0 and !std.mem.eql(u8, value, "0");
+}
+
+fn portmasterReloadPressed(sampler: anytype, player_index: u8) bool {
+    for (portmaster_reload_codes) |code| {
+        if (sampler.codeIsPressed(code, player_index)) return true;
+    }
+    return false;
+}
+
+fn portmasterReloadDown(sampler: anytype, player_index: u8) bool {
+    for (portmaster_reload_codes) |code| {
+        if (sampler.codeIsDown(code, player_index)) return true;
+    }
+    return false;
+}
 
 fn resolveMovementMode(config: *const formats.crimson_cfg.CrimsonCfg, player_index: usize) i32 {
     return @intCast(formats.crimson_cfg.playerMovement(config, player_index));

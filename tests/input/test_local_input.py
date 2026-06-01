@@ -342,6 +342,42 @@ def test_local_input_reload_pressed_reads_per_player_input_slot(
     assert out.reload_pressed is True
 
 
+def test_portmaster_reload_accepts_r_and_left_triggers(
+    mocker: MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRIMSON_PORTMASTER_CONTROLS", "1")
+    _patch_no_user_input(mocker)
+    pressed_codes = {0x13}
+    down_codes = {0x129}
+    mocker.patch.object(
+        local_input,
+        "input_code_is_pressed",
+        lambda key, **kwargs: int(kwargs.get("player_index", -1)) == 0 and int(key) in pressed_codes,
+    )
+    mocker.patch.object(
+        local_input,
+        "input_code_is_down",
+        lambda key, **kwargs: int(kwargs.get("player_index", -1)) == 0 and int(key) in down_codes,
+    )
+    interpreter = local_input.LocalInputInterpreter()
+    player = PlayerState(index=0, pos=Vec2(100.0, 100.0), aim=Vec2(160.0, 100.0))
+
+    out = interpreter.build_player_input(
+        player_index=0,
+        player=player,
+        config=_test_config(player_count=1),
+        mouse_screen=Vec2(),
+        mouse_world=Vec2(),
+        screen_center=Vec2(),
+        dt=0.1,
+        creatures=[],
+    )
+
+    assert out.reload_pressed is True
+    assert out.reload_down is True
+
+
 def test_local_input_mouse_point_click_marks_move_to_cursor_press(
     mocker: MockerFixture,
 ) -> None:

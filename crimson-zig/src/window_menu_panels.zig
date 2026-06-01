@@ -556,6 +556,7 @@ fn questTotalPlayed(status: formats.game_cfg.Status) u32 {
 pub const QuestState = struct {
     panel: PanelState = .{},
     stage: i32 = 1,
+    row_selection: usize = 0,
     closing: bool = false,
     closing_level_key: ?i32 = null,
     closing_back: bool = false,
@@ -567,6 +568,7 @@ pub const QuestState = struct {
     pub fn resetToLevelKey(self: *QuestState, level_key: i32) void {
         self.reset();
         self.stage = std.math.clamp(@divTrunc(level_key, 100), @as(i32, 1), @as(i32, 5));
+        self.row_selection = @intCast(std.math.clamp(@mod(level_key, 100) - 1, @as(i32, 0), @as(i32, 9)));
     }
 };
 
@@ -632,13 +634,29 @@ pub fn updateQuests(state: *QuestState, frame_dt: f32, config: *formats.crimson_
         return questResultWithDirty(.{ .play_button_click = true }, config_dirty, status_dirty);
     }
 
-    if (rl.isKeyPressed(.left)) state.stage = @max(1, state.stage - 1);
-    if (rl.isKeyPressed(.right)) state.stage = @min(5, state.stage + 1);
+    const hardcore = hardcoreUnlocked(status.*, demo_enabled);
+    if (rl.isKeyPressed(.left)) {
+        state.stage = @max(1, state.stage - 1);
+        clampQuestRowSelection(state, status.*, config.hardcore_flag != 0, demo_enabled);
+    }
+    if (rl.isKeyPressed(.right)) {
+        state.stage = @min(5, state.stage + 1);
+        clampQuestRowSelection(state, status.*, config.hardcore_flag != 0, demo_enabled);
+    }
+    if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w)) {
+        state.row_selection = previousUnlockedQuestRow(status.*, config.hardcore_flag != 0, demo_enabled, state.stage, state.row_selection);
+        return questResultWithDirty(.{ .play_button_click = true }, config_dirty, status_dirty);
+    }
+    if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s)) {
+        state.row_selection = nextUnlockedQuestRow(status.*, config.hardcore_flag != 0, demo_enabled, state.stage, state.row_selection);
+        return questResultWithDirty(.{ .play_button_click = true }, config_dirty, status_dirty);
+    }
     const layout = questLayout(state.panel.timeline_ms);
     const hovered_stage = hoveredQuestStage(layout);
     if (hovered_stage) |stage| {
         if (rl.isMouseButtonPressed(.left)) {
             state.stage = stage;
+            clampQuestRowSelection(state, status.*, config.hardcore_flag != 0, demo_enabled);
             return questResultWithDirty(.{ .play_button_click = true }, config_dirty, status_dirty);
         }
     }
@@ -647,21 +665,26 @@ pub fn updateQuests(state: *QuestState, frame_dt: f32, config: *formats.crimson_
         return questResultWithDirty(tryStartQuest(state, config, status.*, demo_enabled, state.stage, row), config_dirty, status_dirty);
     }
 
-    const hovered_row = hoveredQuestRow(layout, hardcoreUnlocked(status.*, demo_enabled));
+    const hovered_row = hoveredQuestRow(layout, hardcore);
 
-    if (hardcoreUnlocked(status.*, demo_enabled)) {
+    if (hardcore) {
         const hardcore_rect = hardcoreCheckRect(layout);
         if (rl.checkCollisionPointRec(rl.getMousePosition(), hardcore_rect) and rl.isMouseButtonPressed(.left)) {
             config.hardcore_flag = if (config.hardcore_flag == 0) 1 else 0;
             if (demo_enabled) config.hardcore_flag = 0;
+            clampQuestRowSelection(state, status.*, config.hardcore_flag != 0, demo_enabled);
             return questResultWithDirty(.{ .play_button_click = true, .config_dirty = true }, config_dirty, status_dirty);
         }
     }
 
     if (hovered_row) |row| {
-        if (rl.isMouseButtonPressed(.left) or window_ui.confirmPressed()) {
+        state.row_selection = row;
+        if (rl.isMouseButtonPressed(.left)) {
             return questResultWithDirty(tryStartQuest(state, config, status.*, demo_enabled, state.stage, row), config_dirty, status_dirty);
         }
+    }
+    if (window_ui.confirmPressed()) {
+        return questResultWithDirty(tryStartQuest(state, config, status.*, demo_enabled, state.stage, state.row_selection), config_dirty, status_dirty);
     }
 
     if (questBackButtonActivated(layout)) {
@@ -720,8 +743,10 @@ fn drawQuestContent(state: *const QuestState, runtime_assets: *const window_asse
     for (0..10) |row| {
         const level_minor = @as(i32, @intCast(row + 1));
         const unlocked = questUnlocked(status, config.hardcore_flag != 0, demo_enabled, state.stage, level_minor);
+        const selected = row == state.row_selection;
         const hovered = hovered_row != null and hovered_row.? == row;
-        const color = questRowColor(config.hardcore_flag != 0, hovered);
+        const focused = selected or hovered;
+        const color = questRowColor(config.hardcore_flag != 0, focused);
         window_ui.drawSmallTextFmt("{d}.{d}", runtime_assets, .{ state.stage, level_minor }, layout.list_pos.x, y, color);
         const title = if (unlocked) questTitle(state.stage, level_minor) else "???";
         window_ui.drawSmallText(runtime_assets, title, layout.list_pos.x + quest_list_name_x_offset, y, color);
@@ -760,6 +785,38 @@ fn questUnlocked(status: formats.game_cfg.Status, hardcore: bool, demo_enabled: 
     else
         visibleQuestUnlockIndex(status, demo_enabled);
     return @as(i32, unlock) >= global_index;
+}
+
+fn clampQuestRowSelection(state: *QuestState, status: formats.game_cfg.Status, hardcore: bool, demo_enabled: bool) void {
+    if (state.row_selection > 9) state.row_selection = 9;
+    if (questUnlocked(status, hardcore, demo_enabled, state.stage, @intCast(state.row_selection + 1))) return;
+    state.row_selection = lastUnlockedQuestRow(status, hardcore, demo_enabled, state.stage);
+}
+
+fn lastUnlockedQuestRow(status: formats.game_cfg.Status, hardcore: bool, demo_enabled: bool, stage: i32) usize {
+    var row: usize = 10;
+    while (row > 0) {
+        row -= 1;
+        if (questUnlocked(status, hardcore, demo_enabled, stage, @intCast(row + 1))) return row;
+    }
+    return 0;
+}
+
+fn previousUnlockedQuestRow(status: formats.game_cfg.Status, hardcore: bool, demo_enabled: bool, stage: i32, current: usize) usize {
+    var row = @min(current, @as(usize, 9));
+    while (row > 0) {
+        row -= 1;
+        if (questUnlocked(status, hardcore, demo_enabled, stage, @intCast(row + 1))) return row;
+    }
+    return @min(current, lastUnlockedQuestRow(status, hardcore, demo_enabled, stage));
+}
+
+fn nextUnlockedQuestRow(status: formats.game_cfg.Status, hardcore: bool, demo_enabled: bool, stage: i32, current: usize) usize {
+    var row = @min(current, @as(usize, 9)) + 1;
+    while (row < 10) : (row += 1) {
+        if (questUnlocked(status, hardcore, demo_enabled, stage, @intCast(row + 1))) return row;
+    }
+    return @min(current, lastUnlockedQuestRow(status, hardcore, demo_enabled, stage));
 }
 
 fn hardcoreUnlocked(status: formats.game_cfg.Status, demo_enabled: bool) bool {

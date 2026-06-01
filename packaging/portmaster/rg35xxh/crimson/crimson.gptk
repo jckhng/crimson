@@ -6,8 +6,8 @@ b = esc
 x = backspace
 y = mouse_right
 
-l1 = mouse_middle
-l2 = mouse_middle
+l1 = r
+l2 = r
 
 r1 = mouse_left
 r2 = mouse_left

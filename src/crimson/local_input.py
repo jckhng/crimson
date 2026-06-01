@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
@@ -39,6 +40,26 @@ _ALT_MOVE_KEY_LEFT = 0xCB
 _ALT_MOVE_KEY_RIGHT = 0xCD
 _AIM_POV_LEFT_CODE = 0x133
 _AIM_POV_RIGHT_CODE = 0x134
+_KEY_R_CODE = 0x13
+_GAMEPAD_LEFT_TRIGGER_1_CODE = 0x127
+_GAMEPAD_LEFT_TRIGGER_2_CODE = 0x129
+_PORTMASTER_RELOAD_CODES = (
+    _KEY_R_CODE,
+    _GAMEPAD_LEFT_TRIGGER_1_CODE,
+    _GAMEPAD_LEFT_TRIGGER_2_CODE,
+)
+
+
+def _portmaster_controls_enabled() -> bool:
+    return bool(os.environ.get("CRIMSON_PORTMASTER_CONTROLS"))
+
+
+def _portmaster_reload_pressed(*, player_index: int) -> bool:
+    return any(input_code_is_pressed(code, player_index=player_index) for code in _PORTMASTER_RELOAD_CODES)
+
+
+def _portmaster_reload_down(*, player_index: int) -> bool:
+    return any(input_code_is_down(code, player_index=player_index) for code in _PORTMASTER_RELOAD_CODES)
 
 
 class _PerPlayerInputState(msgspec.Struct):
@@ -471,6 +492,9 @@ class LocalInputInterpreter:
             fire_down = True
         reload_pressed = input_code_is_pressed(reload_key, player_index=idx)
         reload_down = input_code_is_down(reload_key, player_index=idx)
+        if _portmaster_controls_enabled() and idx == 0:
+            reload_pressed = bool(reload_pressed or _portmaster_reload_pressed(player_index=idx))
+            reload_down = bool(reload_down or _portmaster_reload_down(player_index=idx))
 
         return PlayerInput(
             move=move_vec,

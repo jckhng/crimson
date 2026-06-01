@@ -231,6 +231,7 @@ fn defaultConfigForRuntime() formats.crimson_cfg.CrimsonCfg {
         binds.axis_aim_x = 0x153;
         binds.fire = 0x128;
         formats.crimson_cfg.setPlayerBindBlock(&cfg, 0, binds);
+        cfg.keybind_reload = 0x13;
     }
     return cfg;
 }

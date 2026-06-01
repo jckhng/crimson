@@ -69,7 +69,9 @@ esac
 
 if [[ -z "$LIB_DIR" ]]; then
     RUNPATH="$(readelf -d "$BIN_PATH" 2>/dev/null | sed -n 's/.*Library runpath: \[\(.*\)\].*/\1/p' | tr ':' '\n' | head -n 1 || true)"
-    if [[ -n "$RUNPATH" && -f "$ROOT_DIR/crimson-zig/$RUNPATH/libraylib.so" ]]; then
+    if [[ -n "$RUNPATH" && "$RUNPATH" = /* && -f "$RUNPATH/libraylib.so" ]]; then
+        LIB_DIR="$(cd "$RUNPATH" && pwd)"
+    elif [[ -n "$RUNPATH" && -f "$ROOT_DIR/crimson-zig/$RUNPATH/libraylib.so" ]]; then
         LIB_DIR="$(cd "$ROOT_DIR/crimson-zig/$RUNPATH" && pwd)"
     fi
 fi
