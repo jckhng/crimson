@@ -500,10 +500,16 @@ fn updateHighScores(
     const timeline_update = advanceChildTimeline(state, frame_dt);
     if (timeline_update.closed_action) |action| return finishChildAction(state, action);
     const left_rect = animatedLeftPanelRect(left_panel_rect, state.hub.panel.timeline_ms);
+    const compact = useCompactSplitPanelLayout(@intCast(rl.getScreenWidth()));
     const hs = &state.high_scores;
-    const buttons = highScoreButtons(left_rect);
     if (!childInteractive(state)) return .{};
-    window_ui.updateSelectionFromPointer(&hs.button_selection, buttons[0..]);
+    if (compact) {
+        const buttons = compactHighScoreButtons();
+        window_ui.updateSelectionFromPointer(&hs.button_selection, buttons[0..]);
+    } else {
+        const buttons = highScoreButtons(left_rect);
+        window_ui.updateSelectionFromPointer(&hs.button_selection, buttons[0..]);
+    }
     const rows: usize = 10;
     const max_scroll = if (hs.records.len > rows) hs.records.len - rows else 0;
 
@@ -542,14 +548,29 @@ fn updateHighScores(
         loadHighScores(hs, allocator, base_dir, config.*, status);
         return .{ .quest_level_key = quest_level_key, .config_dirty = true, .play_button_click = true };
     }
+    if (compact) {
+        if (updateHighScoreQuestKeyboard(hs, config, status)) |quest_level_key| {
+            loadHighScores(hs, allocator, base_dir, config.*, status);
+            return .{ .quest_level_key = quest_level_key, .config_dirty = true, .play_button_click = true };
+        }
+    }
 
-    if (!useCompactSplitPanelLayout(config.screen_width)) {
+    if (!compact) {
         const right_rect = animatedRightPanelRect(right_panel_rect, state.hub.panel.timeline_ms);
         if (updateHighScoreWidgets(hs, allocator, base_dir, config, status, highScoreRightOptionsRect(right_rect, config.screen_width))) |widget_result| {
             return widget_result;
         }
     }
 
+    if (compact) {
+        const buttons = compactHighScoreButtons();
+        if (!window_ui.buttonActivated(buttons[0..], hs.button_selection)) return .{};
+        hs.dropdown_open = .none;
+        beginChildClose(state, highScoreBackChildAction(hs.back_action));
+        return .{ .play_button_click = true };
+    }
+
+    const buttons = highScoreButtons(left_rect);
     if (!window_ui.buttonActivated(buttons[0..], hs.button_selection)) return .{};
 
     return switch (hs.button_selection) {
@@ -581,6 +602,9 @@ fn updateWeapons(state: *State, frame_dt: f32, config: formats.crimson_cfg.Crims
     const timeline_update = advanceChildTimeline(state, frame_dt);
     if (timeline_update.closed_action) |action| return finishChildAction(state, action);
     const left_rect = animatedLeftPanelRect(left_panel_rect, state.hub.panel.timeline_ms);
+    const compact = useCompactSplitPanelLayout(@intCast(rl.getScreenWidth()));
+    const list_rect = if (compact) compactDatabaseListRect() else weaponListRect(left_rect);
+    const back_button = if (compact) compactDatabaseBackButton()[0] else weaponBackButton(left_rect)[0];
     var weapon_ids: [state_mod.weapon_count_size]game_ids.WeaponId = undefined;
     const total = buildWeaponList(&weapon_ids, config, status);
     const screen = &state.weapons;
@@ -593,13 +617,13 @@ fn updateWeapons(state: *State, frame_dt: f32, config: formats.crimson_cfg.Crims
         screen.selection = total - 1;
     }
 
-    if (rl.isKeyPressed(.escape) or backButtonActivated(weaponBackButton(left_rect)[0])) {
+    if (rl.isKeyPressed(.escape) or backButtonActivated(back_button)) {
         beginChildClose(state, .hub);
         return .{ .play_button_click = true };
     }
 
     const mouse = rl.getMousePosition();
-    if (rl.getMouseWheelMove() != 0 and rectContains(weaponListRect(left_rect), mouse)) {
+    if (rl.getMouseWheelMove() != 0 and rectContains(list_rect, mouse)) {
         const max_scroll = if (total > 10) total - 10 else 0;
         if (rl.getMouseWheelMove() > 0) {
             if (screen.scroll > 0) screen.scroll -= 1;
@@ -618,7 +642,7 @@ fn updateWeapons(state: *State, frame_dt: f32, config: formats.crimson_cfg.Crims
         if (screen.selection < screen.scroll) screen.scroll = screen.selection;
         if (screen.selection >= screen.scroll + 10) screen.scroll = screen.selection - 9;
     }
-    if (hoveredListRow(weaponListRect(left_rect), total, screen.scroll)) |row| {
+    if (hoveredListRow(list_rect, total, screen.scroll)) |row| {
         screen.selection = row;
     }
 
@@ -629,6 +653,9 @@ fn updatePerks(state: *State, frame_dt: f32, status: formats.game_cfg.Status) Up
     const timeline_update = advanceChildTimeline(state, frame_dt);
     if (timeline_update.closed_action) |action| return finishChildAction(state, action);
     const left_rect = animatedLeftPanelRect(left_panel_rect, state.hub.panel.timeline_ms);
+    const compact = useCompactSplitPanelLayout(@intCast(rl.getScreenWidth()));
+    const list_rect = if (compact) compactDatabaseListRect() else perkListRect(left_rect);
+    const back_button = if (compact) compactDatabaseBackButton()[0] else perkBackButton(left_rect)[0];
     var perk_ids: [state_mod.perk_count_size]game_ids.PerkId = undefined;
     const total = buildPerkList(&perk_ids, status);
     const screen = &state.perks;
@@ -643,13 +670,13 @@ fn updatePerks(state: *State, frame_dt: f32, status: formats.game_cfg.Status) Up
         screen.selection = total - 1;
     }
 
-    if (rl.isKeyPressed(.escape) or backButtonActivated(perkBackButton(left_rect)[0])) {
+    if (rl.isKeyPressed(.escape) or backButtonActivated(back_button)) {
         beginChildClose(state, .hub);
         return .{ .play_button_click = true };
     }
 
     const mouse = rl.getMousePosition();
-    if (rl.getMouseWheelMove() != 0 and rectContains(perkListRect(left_rect), mouse)) {
+    if (rl.getMouseWheelMove() != 0 and rectContains(list_rect, mouse)) {
         const max_scroll = if (total > 10) total - 10 else 0;
         if (rl.getMouseWheelMove() > 0) {
             if (screen.scroll > 0) screen.scroll -= 1;
@@ -668,7 +695,7 @@ fn updatePerks(state: *State, frame_dt: f32, status: formats.game_cfg.Status) Up
         if (screen.selection < screen.scroll) screen.scroll = screen.selection;
         if (screen.selection >= screen.scroll + 10) screen.scroll = screen.selection - 9;
     }
-    if (hoveredListRow(perkListRect(left_rect), total, screen.scroll)) |row| {
+    if (hoveredListRow(list_rect, total, screen.scroll)) |row| {
         screen.hovered = row;
         if (rl.isMouseButtonPressed(.left)) {
             screen.selection = row;
@@ -766,12 +793,10 @@ fn drawHighScores(
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
         const compact = useCompactSplitPanelLayout(config.screen_width);
         if (compact) {
-            drawCompactSplitPanelShell(assets, timeline_ms);
+            drawCompactHighScores(state, assets, config, status);
         } else {
             drawSplitPanelShell(assets, timeline_ms);
-        }
-        drawHighScoreMainPanel(state, assets, config, status, left_rect);
-        if (!compact) {
+            drawHighScoreMainPanel(state, assets, config, status, left_rect);
             const right_rect = animatedRightPanelRect(right_panel_rect, timeline_ms);
             drawHighScoreRightPanel(state, assets, config, status, preserve_bugs, left_rect, right_rect);
         }
@@ -792,19 +817,19 @@ fn drawWeapons(
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
         const compact = useCompactSplitPanelLayout(config.screen_width);
         if (compact) {
-            drawCompactSplitPanelShell(assets, timeline_ms);
+            drawCompactWeapons(state, assets, config, status, preserve_bugs);
         } else {
             drawSplitPanelShell(assets, timeline_ms);
+            drawWeaponsPanels(
+                state,
+                assets,
+                config,
+                status,
+                preserve_bugs,
+                left_rect,
+                animatedRightPanelRect(right_panel_rect, timeline_ms),
+            );
         }
-        drawWeaponsPanels(
-            state,
-            assets,
-            config,
-            status,
-            preserve_bugs,
-            left_rect,
-            if (compact) null else animatedRightPanelRect(right_panel_rect, timeline_ms),
-        );
         return;
     }
     rl.clearBackground(panel_color);
@@ -822,21 +847,21 @@ fn drawPerks(
         const left_rect = animatedLeftPanelRect(left_panel_rect, timeline_ms);
         const compact = useCompactSplitPanelLayout(config.screen_width);
         if (compact) {
-            drawCompactSplitPanelShell(assets, timeline_ms);
+            drawCompactPerks(state, assets, status, config.gore_disabled, preserve_bugs);
         } else {
             drawSplitPanelShell(assets, timeline_ms);
+            drawPerksPanels(
+                state,
+                assets,
+                status,
+                config.gore_disabled,
+                config.hardcore_flag != 0,
+                preserve_bugs,
+                left_rect,
+                animatedRightPanelRect(right_panel_rect, timeline_ms),
+                config.screen_width,
+            );
         }
-        drawPerksPanels(
-            state,
-            assets,
-            status,
-            config.gore_disabled,
-            config.hardcore_flag != 0,
-            preserve_bugs,
-            left_rect,
-            if (compact) null else animatedRightPanelRect(right_panel_rect, timeline_ms),
-            config.screen_width,
-        );
         return;
     }
     rl.clearBackground(panel_color);
@@ -984,6 +1009,66 @@ fn drawHighScoreMainPanel(
     }
 }
 
+fn drawCompactHighScores(
+    state: *const HighScoresScreen,
+    assets: *const window_assets.RuntimeAssets,
+    config: formats.crimson_cfg.CrimsonCfg,
+    status: formats.game_cfg.Status,
+) void {
+    const panel = compactStatsPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    rl.drawRectangleRec(panel, rl.Color.init(0, 0, 0, 238));
+    drawRectLines(panel, 1.0, rl.Color.init(149, 175, 198, 180));
+
+    const title = highScoreTitle(state.mode);
+    window_ui.drawSmallTextCentered(assets, title, panel.y + 22.0, text_color);
+    drawUnderline(panel.x + 56.0, panel.y + 38.0, panel.width - 112.0);
+
+    var list_top = panel.y + 60.0;
+    if (state.mode == .quests) {
+        var quest_buf: [96]u8 = undefined;
+        const quest_title = questTitleForLevelKey(state.quest_level_key);
+        const quest_label = std.fmt.bufPrint(&quest_buf, "{d}.{d}: {s}", .{
+            @divTrunc(state.quest_level_key, 100),
+            @mod(state.quest_level_key, 100),
+            quest_title,
+        }) catch "Quest";
+        window_ui.drawSmallTextCentered(assets, quest_label, panel.y + 48.0, if (config.hardcore_flag != 0) rl.Color.init(250, 70, 60, 220) else value_color);
+        drawCompactQuestArrowText(assets, state, config, status, panel);
+        list_top = panel.y + 78.0;
+    }
+
+    window_ui.drawSmallText(assets, "Rank", panel.x + 36.0, list_top, text_color);
+    window_ui.drawSmallText(assets, "Score", panel.x + 94.0, list_top, text_color);
+    window_ui.drawSmallText(assets, "Player", panel.x + 172.0, list_top, text_color);
+
+    const frame = rl.Rectangle.init(panel.x + 30.0, list_top + 19.0, panel.width - 60.0, 178.0);
+    drawListFrame(frame);
+    if (state.load_error) |load_error| {
+        window_ui.drawSmallText(assets, load_error, frame.x + 8.0, frame.y + 8.0, rl.Color.orange);
+    } else if (state.records.len == 0) {
+        window_ui.drawSmallText(assets, "No scores yet.", frame.x + 8.0, frame.y + 8.0, muted_text);
+    } else {
+        const selected_rank = state.highlight_rank;
+        const start = @min(state.scroll, if (state.records.len > 10) state.records.len - 10 else 0);
+        const end = @min(start + 10, state.records.len);
+        for (state.records[start..end], 0..) |record, row| {
+            const idx = start + row;
+            const color = if (selected_rank != null and selected_rank.? == idx) text_color else muted_text;
+            var value_buf: [32]u8 = undefined;
+            const y = frame.y + 8.0 + @as(f32, @floatFromInt(row)) * 16.0;
+            window_ui.drawSmallTextFmt("{d}", assets, .{idx + 1}, frame.x + 8.0, y, color);
+            window_ui.drawSmallText(assets, formatHighScoreValue(&value_buf, record), frame.x + 64.0, y, color);
+            window_ui.drawSmallText(assets, clippedRecordName(record), frame.x + 144.0, y, color);
+        }
+    }
+
+    const buttons = compactHighScoreButtons();
+    for (buttons, 0..) |button, idx| {
+        const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), button.rect);
+        window_ui.drawButton(button, idx == state.button_selection, hovered, assets);
+    }
+}
+
 fn drawHighScoreRightPanel(
     state: *const HighScoresScreen,
     assets: *const window_assets.RuntimeAssets,
@@ -1120,6 +1205,35 @@ fn drawWeaponsPanels(
     window_ui.drawSmallTextFmt("Clip size: {d}", assets, .{stats_entry.clip_size}, detail_x + 66.0, details_rect.y + 164.0, text_color);
 }
 
+fn drawCompactWeapons(
+    state: *const WeaponsScreen,
+    assets: *const window_assets.RuntimeAssets,
+    config: formats.crimson_cfg.CrimsonCfg,
+    status: formats.game_cfg.Status,
+    preserve_bugs: bool,
+) void {
+    const panel = drawCompactDatabasePanel(assets, "Unlocked Weapons Database");
+    var weapon_ids: [state_mod.weapon_count_size]game_ids.WeaponId = undefined;
+    const total = buildWeaponList(&weapon_ids, config, status);
+    const weapon_label = if (total == 1) "weapon" else "weapons";
+    window_ui.drawSmallTextFmt("{d} {s} in database", assets, .{ total, weapon_label }, panel.x + 34.0, panel.y + 54.0, muted_text);
+    window_ui.drawSmallText(assets, "Weapon", panel.x + 34.0, panel.y + 82.0, text_color);
+
+    const list_rect = compactDatabaseListRect();
+    drawListFrame(list_rect);
+    const start = @min(state.scroll, if (total > 10) total - 10 else 0);
+    const end = @min(start + 10, total);
+    for (weapon_ids[start..end], 0..) |weapon_id, row| {
+        const list_index = start + row;
+        const color = if (list_index == state.selection) text_color else muted_text;
+        window_ui.drawSmallText(assets, game_ids.weaponDisplayName(weapon_id, preserve_bugs), list_rect.x + 8.0, list_rect.y + 8.0 + @as(f32, @floatFromInt(row)) * 16.0, color);
+    }
+
+    const back = compactDatabaseBackButton()[0];
+    const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), back.rect);
+    window_ui.drawButton(back, false, hovered, assets);
+}
+
 fn drawPerksPanels(
     state: *const PerksScreen,
     assets: *const window_assets.RuntimeAssets,
@@ -1182,6 +1296,35 @@ fn drawPerksPanels(
         y += 18.0;
     }
     drawWrappedSmallText(assets, game_ids.perkDisplayDescription(perk_id, violence_disabled, preserve_bugs), detail_x + 16.0, y, 256.0, muted_text);
+}
+
+fn drawCompactPerks(
+    state: *const PerksScreen,
+    assets: *const window_assets.RuntimeAssets,
+    status: formats.game_cfg.Status,
+    violence_disabled: u8,
+    preserve_bugs: bool,
+) void {
+    const panel = drawCompactDatabasePanel(assets, "Unlocked Perks Database");
+    var perk_ids: [state_mod.perk_count_size]game_ids.PerkId = undefined;
+    const total = buildPerkList(&perk_ids, status);
+    const perk_label = if (total == 1) "perk" else "perks";
+    window_ui.drawSmallTextFmt("{d} {s} in database", assets, .{ total, perk_label }, panel.x + 34.0, panel.y + 54.0, muted_text);
+    window_ui.drawSmallText(assets, "Perks", panel.x + 34.0, panel.y + 82.0, text_color);
+
+    const list_rect = compactDatabaseListRect();
+    drawListFrame(list_rect);
+    const start = @min(state.scroll, if (total > 10) total - 10 else 0);
+    const end = @min(start + 10, total);
+    for (perk_ids[start..end], 0..) |perk_id, row| {
+        const list_index = start + row;
+        const color = if (list_index == state.selection) text_color else muted_text;
+        window_ui.drawSmallText(assets, game_ids.perkDisplayName(perk_id, violence_disabled, preserve_bugs), list_rect.x + 8.0, list_rect.y + 8.0 + @as(f32, @floatFromInt(row)) * 16.0, color);
+    }
+
+    const back = compactDatabaseBackButton()[0];
+    const hovered = rl.checkCollisionPointRec(rl.getMousePosition(), back.rect);
+    window_ui.drawButton(back, false, hovered, assets);
 }
 
 fn animatedCenterPanelRect(rect: rl.Rectangle, timeline_ms: i32) rl.Rectangle {
@@ -1260,6 +1403,45 @@ fn highScoreButtons(left_rect: rl.Rectangle) [3]window_ui.UiButton {
         window_ui.buttonAt("Update scores", left_rect.x + 234.0, left_rect.y + 268.0, true),
         window_ui.buttonAt("Play a game", left_rect.x + 234.0, left_rect.y + 301.0, true),
         window_ui.buttonAt("Back", left_rect.x + 400.0, left_rect.y + 301.0, false),
+    };
+}
+
+fn compactHighScoreButtons() [1]window_ui.UiButton {
+    const panel = compactStatsPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    return .{
+        window_ui.buttonAt("Back", panel.x + panel.width - 112.0, panel.y + panel.height - 42.0, false),
+    };
+}
+
+fn compactStatsPanelRect(screen_width: f32, screen_height: f32) rl.Rectangle {
+    const width = @min(screen_width - 32.0, @as(f32, 576.0));
+    const height = @min(screen_height - 32.0, @as(f32, 416.0));
+    return rl.Rectangle.init(
+        (screen_width - width) * 0.5,
+        (screen_height - height) * 0.5,
+        width,
+        height,
+    );
+}
+
+fn drawCompactDatabasePanel(assets: *const window_assets.RuntimeAssets, title: []const u8) rl.Rectangle {
+    const panel = compactStatsPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    rl.drawRectangleRec(panel, rl.Color.init(0, 0, 0, 238));
+    drawRectLines(panel, 1.0, rl.Color.init(149, 175, 198, 180));
+    window_ui.drawSmallTextCentered(assets, title, panel.y + 22.0, text_color);
+    drawUnderline(panel.x + 56.0, panel.y + 38.0, panel.width - 112.0);
+    return panel;
+}
+
+fn compactDatabaseListRect() rl.Rectangle {
+    const panel = compactStatsPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    return rl.Rectangle.init(panel.x + 30.0, panel.y + 102.0, panel.width - 60.0, 178.0);
+}
+
+fn compactDatabaseBackButton() [1]window_ui.UiButton {
+    const panel = compactStatsPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    return .{
+        window_ui.buttonAt("Back", panel.x + panel.width - 112.0, panel.y + panel.height - 42.0, false),
     };
 }
 
@@ -2034,6 +2216,37 @@ fn updateHighScoreQuestArrows(
     return null;
 }
 
+fn updateHighScoreQuestKeyboard(
+    state: *HighScoresScreen,
+    config: *formats.crimson_cfg.CrimsonCfg,
+    status: formats.game_cfg.Status,
+) ?i32 {
+    if (state.mode != .quests) return null;
+    const delta: i32 = if (rl.isKeyPressed(.left) or rl.isKeyPressed(.a))
+        -1
+    else if (rl.isKeyPressed(.right) or rl.isKeyPressed(.d))
+        1
+    else
+        return null;
+    return applyHighScoreQuestDelta(state, config.*, status, delta);
+}
+
+fn applyHighScoreQuestDelta(
+    state: *HighScoresScreen,
+    config: formats.crimson_cfg.CrimsonCfg,
+    status: formats.game_cfg.Status,
+    delta: i32,
+) ?i32 {
+    if (state.mode != .quests or delta == 0) return null;
+    const unlock = if (config.hardcore_flag != 0) status.quest_unlock_index_full else status.quest_unlock_index;
+    const max_index = std.math.clamp(unlock, @as(i32, 0), @as(i32, 49));
+    const current_index = questLevelKeyToIndex(state.quest_level_key);
+    const next_index = std.math.clamp(current_index + delta, @as(i32, 0), max_index);
+    if (next_index == current_index) return null;
+    state.quest_level_key = questIndexToLevelKey(next_index);
+    return state.quest_level_key;
+}
+
 fn drawQuestArrows(
     assets: *const window_assets.RuntimeAssets,
     quest_level_key: i32,
@@ -2066,6 +2279,21 @@ fn drawQuestArrows(
             tint,
         );
     }
+}
+
+fn drawCompactQuestArrowText(
+    assets: *const window_assets.RuntimeAssets,
+    state: *const HighScoresScreen,
+    config: formats.crimson_cfg.CrimsonCfg,
+    status: formats.game_cfg.Status,
+    panel: rl.Rectangle,
+) void {
+    const unlock = if (config.hardcore_flag != 0) status.quest_unlock_index_full else status.quest_unlock_index;
+    const max_index = std.math.clamp(unlock, @as(i32, 0), @as(i32, 49));
+    const current_index = questLevelKeyToIndex(state.quest_level_key);
+    const y = panel.y + 48.0;
+    if (current_index > 0) window_ui.drawSmallText(assets, "<", panel.x + 48.0, y, value_color);
+    if (current_index < max_index) window_ui.drawSmallText(assets, ">", panel.x + panel.width - 56.0, y, value_color);
 }
 
 fn questPrevArrowRect(left_rect: rl.Rectangle) rl.Rectangle {

@@ -925,6 +925,7 @@ const ResultsScreen = struct {
     quest_breakdown_anim: quest_results.QuestResultsBreakdownAnim = .{},
     quest_unlock_weapon_name: ?[]const u8 = null,
     quest_unlock_perk_name: ?[]const u8 = null,
+    compact_page: ResultsCompactPage = .summary,
     score_card_hover: ResultsScoreCardHover = .{},
     timeline_ms: i32 = 0,
     panel_open_sfx_played: bool = false,
@@ -959,6 +960,11 @@ const ResultsScreen = struct {
         const dt_ms: i32 = @intFromFloat(@min(frame_dt, 0.1) * 1000.0);
         if (dt_ms > 0) self.timeline_ms = @min(resultsTimelineMaxMs(self), self.timeline_ms + dt_ms);
     }
+};
+
+const ResultsCompactPage = enum {
+    summary,
+    score,
 };
 
 const ResultsScoreCardHover = struct {
@@ -1979,6 +1985,37 @@ const App = struct {
                 return;
             }
             updateResultsScoreCardHover(results, frame_dt);
+            const screen_width: f32 = @floatFromInt(rl.getScreenWidth());
+            if (resultsUsesCompactPagedView(results, screen_width) and results.compact_page == .summary) {
+                const buttons = resultsCompactSummaryButtonsFor(results);
+                window_ui.updateSelectionFromPointer(&self.results_selection, buttons.items[0..buttons.len]);
+                if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w)) {
+                    self.results_selection = if (self.results_selection == 0) buttons.len - 1 else self.results_selection - 1;
+                }
+                if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s)) {
+                    self.results_selection = (self.results_selection + 1) % buttons.len;
+                }
+
+                const activated = window_ui.buttonActivated(buttons.items[0..buttons.len], self.results_selection);
+                if (!activated) return;
+                self.audio.playUiButtonClick();
+                switch (self.results_selection) {
+                    0 => {
+                        results.compact_page = .score;
+                        self.results_selection = 0;
+                        if (results.highscore) |*highscore| {
+                            highscore.defer_name_input_until_controls_released = true;
+                        }
+                    },
+                    1 => {
+                        self.results = null;
+                        self.menu.openRoot();
+                        self.setScreen(.main_menu);
+                    },
+                    else => {},
+                }
+                return;
+            }
             if (results.highscore) |*highscore| {
                 if (highscore.promptActive()) {
                     self.updateResultsHighscoreEntry(results, highscore);
@@ -2731,10 +2768,13 @@ const App = struct {
     }
 
     fn drawStatisticsMenu(self: *const App) void {
+        var draw_config = self.runtime.config;
+        draw_config.screen_width = @intCast(rl.getScreenWidth());
+        draw_config.screen_height = @intCast(rl.getScreenHeight());
         window_statistics.draw(
             &self.statistics_menu,
             if (self.runtime_assets) |*assets| assets else null,
-            self.runtime.config,
+            draw_config,
             self.runtime.status,
             self.preserve_bugs,
         );
@@ -3021,6 +3061,10 @@ const App = struct {
         if (self.results) |results| {
             if (self.runtime_assets) |*runtime_assets| {
                 const screen_width: f32 = @floatFromInt(rl.getScreenWidth());
+                if (resultsUsesCompactPagedView(&results, screen_width)) {
+                    self.drawCompactResults(runtime_assets, &results, screen_width);
+                    return;
+                }
                 if (isQuestFailedResult(&results)) {
                     const layout = questFailedResultsPanelLayoutForTimeline(screen_width, results.timeline_ms);
                     drawTextureFit(
@@ -3178,6 +3222,48 @@ const App = struct {
             else
                 idx == self.results_selection;
             window_ui.drawButton(button, selected, mouse_hovered, if (self.runtime_assets) |*assets| assets else null);
+        }
+    }
+
+    fn drawCompactResults(
+        self: *const App,
+        runtime_assets: *const window_assets.RuntimeAssets,
+        results: *const ResultsScreen,
+        screen_width: f32,
+    ) void {
+        const breakdown_pending = questResultsBreakdownPending(results);
+        if (results.compact_page == .summary or breakdown_pending) {
+            drawResultsCompactSummary(runtime_assets, results, screen_width);
+        } else if (!breakdown_pending and results.highscore != null) {
+            const highscore = results.highscore.?;
+            drawResultsCompactScore(runtime_assets, results, &highscore, screen_width);
+        } else {
+            drawResultsCompactScore(runtime_assets, results, null, screen_width);
+        }
+
+        const prompt_active = !breakdown_pending and results.compact_page == .score and
+            if (results.highscore) |highscore| highscore.promptActive() else false;
+        const buttons = if (breakdown_pending)
+            ResultsButtons{ .items = .{
+                .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+                .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+                .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+                .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+            }, .len = 0 }
+        else if (results.compact_page == .summary)
+            resultsCompactSummaryButtonsFor(results)
+        else if (prompt_active)
+            resultsHighscoreButtonsFor(results)
+        else
+            resultsButtonsFor(results);
+
+        for (buttons.items[0..buttons.len], 0..) |button, idx| {
+            const mouse_hovered = rl.checkCollisionPointRec(rl.getMousePosition(), button.rect);
+            const selected = if (prompt_active)
+                if (results.highscore) |highscore| idx == highscore.selection else false
+            else
+                idx == self.results_selection;
+            window_ui.drawButton(button, selected, mouse_hovered, runtime_assets);
         }
     }
 
@@ -3777,6 +3863,20 @@ fn resultsButtonsFor(results: *const ResultsScreen) ResultsButtons {
     };
 }
 
+fn resultsCompactSummaryButtonsFor(results: *const ResultsScreen) ResultsButtons {
+    const panel = resultsCompactPanelRect(@floatFromInt(rl.getScreenWidth()), @floatFromInt(rl.getScreenHeight()));
+    _ = results;
+    return .{
+        .items = .{
+            window_ui.buttonAt("Next", panel.x + 180.0, panel.y + panel.height - 54.0, true),
+            window_ui.buttonAt("Main Menu", panel.x + 306.0, panel.y + panel.height - 54.0, true),
+            .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+            .{ .label = "", .rect = rl.Rectangle.init(0.0, 0.0, 0.0, 0.0) },
+        },
+        .len = 2,
+    };
+}
+
 fn resultsButtonLabelsFor(results: *const ResultsScreen) ResultsButtonLabels {
     if (results.run_config.game_mode == .quests) {
         return switch (results.reason) {
@@ -3985,6 +4085,14 @@ fn resultsActionButtonLayout(results: *const ResultsScreen, screen_width: f32) R
 }
 
 fn resultsActionButtonLayoutForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) ResultsActionButtonLayout {
+    if (resultsUsesCompactPagedView(results, screen_width)) {
+        const panel = resultsCompactPanelRect(screen_width, @floatFromInt(rl.getScreenHeight()));
+        return .{
+            .x = panel.x + 176.0,
+            .y = panel.y + panel.height - 112.0,
+        };
+    }
+
     const qualifies = resultsQualifiesForTop100(results);
     if (isQuestFailedResult(results)) {
         const layout = questFailedResultsPanelLayoutForTimeline(screen_width, timeline_ms);
@@ -4025,6 +4133,10 @@ fn resultsHighscoreOkButtonRect(results: *const ResultsScreen, screen_width: f32
 }
 
 fn resultsHighscoreOkButtonRectForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) rl.Rectangle {
+    if (resultsUsesCompactPagedView(results, screen_width)) {
+        const panel = resultsCompactPanelRect(screen_width, @floatFromInt(rl.getScreenHeight()));
+        return window_ui.buttonAt("OK", panel.x + 312.0, panel.y + 118.0, false).rect;
+    }
     if (isQuestCompletedResult(results)) {
         const layout = questResultsPanelLayoutForTimeline(screen_width, timeline_ms);
         return window_ui.buttonAt("OK", layout.top_left.x + 390.0, layout.top_left.y + 142.0, false).rect;
@@ -4038,6 +4150,17 @@ fn resultsHighscorePromptLayout(results: *const ResultsScreen, screen_width: f32
 }
 
 fn resultsHighscorePromptLayoutForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) ResultsHighscorePromptLayout {
+    if (resultsUsesCompactPagedView(results, screen_width)) {
+        const panel = resultsCompactPanelRect(screen_width, @floatFromInt(rl.getScreenHeight()));
+        return .{
+            .prompt_x = panel.x + 172.0,
+            .prompt_y = panel.y + 78.0,
+            .input_rect = rl.Rectangle.init(panel.x + 112.0, panel.y + 116.0, 188.0, 18.0),
+            .saved_x = panel.x + 172.0,
+            .saved_y = panel.y + 78.0,
+        };
+    }
+
     if (isQuestCompletedResult(results)) {
         const layout = questResultsPanelLayoutForTimeline(screen_width, timeline_ms);
         const content_x = layout.top_left.x + 220.0;
@@ -4068,6 +4191,9 @@ fn resultsNameEntryScoreCardPos(results: *const ResultsScreen, screen_width: f32
 
 fn resultsNameEntryScoreCardPosForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) rl.Vector2 {
     const prompt = resultsHighscorePromptLayoutForTimeline(results, screen_width, timeline_ms);
+    if (resultsUsesCompactPagedView(results, screen_width)) {
+        return rl.Vector2.init(prompt.input_rect.x + 34.0, prompt.input_rect.y + 72.0);
+    }
     if (isQuestCompletedResult(results)) {
         return rl.Vector2.init(prompt.input_rect.x + 26.0, prompt.input_rect.y + 46.0);
     }
@@ -4079,6 +4205,11 @@ fn resultsSavedScoreCardPos(results: *const ResultsScreen, screen_width: f32) rl
 }
 
 fn resultsSavedScoreCardPosForTimeline(results: *const ResultsScreen, screen_width: f32, timeline_ms: i32) rl.Vector2 {
+    if (resultsUsesCompactPagedView(results, screen_width)) {
+        const panel = resultsCompactPanelRect(screen_width, @floatFromInt(rl.getScreenHeight()));
+        return rl.Vector2.init(panel.x + 160.0, panel.y + 94.0);
+    }
+
     const qualifies = resultsQualifiesForTop100(results);
     if (isQuestCompletedResult(results)) {
         const layout = questResultsPanelLayoutForTimeline(screen_width, timeline_ms);
@@ -4115,6 +4246,22 @@ fn resultsVisibleScoreCard(results: *const ResultsScreen, screen_width: f32) ?Re
         };
     }
     return null;
+}
+
+fn resultsUsesCompactPagedView(results: *const ResultsScreen, screen_width: f32) bool {
+    _ = results;
+    return screen_width <= 768.0;
+}
+
+fn resultsCompactPanelRect(screen_width: f32, screen_height: f32) rl.Rectangle {
+    const width = @min(screen_width - 48.0, @as(f32, 540.0));
+    const height = @min(screen_height - 48.0, @as(f32, 392.0));
+    return rl.Rectangle.init(
+        (screen_width - width) * 0.5,
+        (screen_height - height) * 0.5,
+        width,
+        height,
+    );
 }
 
 fn resultsUsesCompactScoreOverlay(results: *const ResultsScreen, screen_width: f32) bool {
@@ -4173,6 +4320,12 @@ fn resultsScoreCardHoverRects(pos: rl.Vector2) ResultsScoreCardHoverRects {
 
 fn updateResultsScoreCardHover(results: *ResultsScreen, frame_dt: f32) void {
     const dt_hover = @max(frame_dt, 0.0) * 2.0;
+    if (resultsUsesCompactPagedView(results, @floatFromInt(rl.getScreenWidth())) and results.compact_page == .summary) {
+        results.score_card_hover.weapon = resultsHoverStep(results.score_card_hover.weapon, false, dt_hover);
+        results.score_card_hover.time = resultsHoverStep(results.score_card_hover.time, false, dt_hover);
+        results.score_card_hover.hit_ratio = resultsHoverStep(results.score_card_hover.hit_ratio, false, dt_hover);
+        return;
+    }
     const surface = resultsVisibleScoreCard(results, @floatFromInt(rl.getScreenWidth())) orelse {
         results.score_card_hover.weapon = resultsHoverStep(results.score_card_hover.weapon, false, dt_hover);
         results.score_card_hover.time = resultsHoverStep(results.score_card_hover.time, false, dt_hover);
@@ -7624,6 +7777,125 @@ fn colorWithAlpha(color: rl.Color, alpha: f32) rl.Color {
         color.b,
         @intFromFloat(std.math.clamp(alpha, @as(f32, 0.0), @as(f32, 1.0)) * 255.0),
     );
+}
+
+fn drawResultsCompactPanel(runtime_assets: *const window_assets.RuntimeAssets, title: []const u8, subtitle: []const u8, screen_width: f32) rl.Rectangle {
+    const panel = resultsCompactPanelRect(screen_width, @floatFromInt(rl.getScreenHeight()));
+    rl.drawRectangleRec(panel, rl.Color.init(0, 0, 0, 236));
+    rl.drawRectangleLinesEx(panel, 1.0, rl.Color.init(149, 175, 198, 180));
+    drawSmallTextCenteredAtX(runtime_assets, title, panel.x + panel.width * 0.5, panel.y + 26.0, HudTextColor.accent);
+    drawSmallTextCenteredAtX(runtime_assets, subtitle, panel.x + panel.width * 0.5, panel.y + 50.0, HudTextColor.primary);
+    rl.drawLine(
+        @intFromFloat(panel.x + 32.0),
+        @intFromFloat(panel.y + 72.0),
+        @intFromFloat(panel.x + panel.width - 32.0),
+        @intFromFloat(panel.y + 72.0),
+        colorWithAlpha(rl.Color.white, 0.35),
+    );
+    return panel;
+}
+
+fn drawResultsCompactSummary(runtime_assets: *const window_assets.RuntimeAssets, results: *const ResultsScreen, screen_width: f32) void {
+    const panel = drawResultsCompactPanel(runtime_assets, resultsTitle(results.reason), resultsSubtitleFor(results), screen_width);
+    const left_label_x = panel.x + 54.0;
+    const left_value_x = panel.x + 172.0;
+    var elapsed_buf: [16]u8 = undefined;
+    const elapsed_ms = if (results.quest_final_time != null)
+        questResultsDisplayBreakdown(results).final_time_ms
+    else
+        @as(i32, @intCast(results.summary.elapsed_ms_sim));
+    drawResultsCompactStat(runtime_assets, "TIME", ui_formatting.formatTimeMmSs(&elapsed_buf, elapsed_ms), left_label_x, left_value_x, panel.y + 96.0, HudTextColor.primary);
+
+    var xp_buf: [32]u8 = undefined;
+    const xp_text = std.fmt.bufPrint(&xp_buf, "{d}", .{results.summary.player_experience}) catch "?";
+    drawResultsCompactStat(runtime_assets, "XP", xp_text, left_label_x, left_value_x, panel.y + 122.0, HudTextColor.primary);
+
+    var level_buf: [32]u8 = undefined;
+    const level_text = std.fmt.bufPrint(&level_buf, "{d}", .{results.summary.player_level}) catch "?";
+    drawResultsCompactStat(runtime_assets, "LEVEL", level_text, left_label_x, left_value_x, panel.y + 148.0, HudTextColor.primary);
+
+    drawResultsCompactStat(runtime_assets, "WEAPON", weaponName(results.summary.player_weapon_id, results.run_config.preserve_bugs), left_label_x, left_value_x, panel.y + 174.0, HudTextColor.primary);
+
+    var hp_buf: [32]u8 = undefined;
+    const player_health = if (results.player_health_count > 0) results.player_health_values[0] else 0.0;
+    const hp_text = std.fmt.bufPrint(&hp_buf, "{d:.1}", .{player_health}) catch "?";
+    drawResultsCompactStat(runtime_assets, "HP", hp_text, left_label_x, left_value_x, panel.y + 200.0, HudTextColor.primary);
+
+    const right_label_x = panel.x + 300.0;
+    const right_value_x = panel.x + 416.0;
+    if (results.quest_final_time != null) {
+        const breakdown = questResultsDisplayBreakdown(results);
+        var base_buf: [16]u8 = undefined;
+        var life_buf: [16]u8 = undefined;
+        var perk_buf: [16]u8 = undefined;
+        var final_buf: [16]u8 = undefined;
+        drawResultsCompactStat(runtime_assets, "BASE", ui_formatting.formatTimeMmSs(&base_buf, breakdown.base_time_ms), right_label_x, right_value_x, panel.y + 96.0, questResultsBreakdownRowColor(results, 0, false));
+        drawResultsCompactStatFmt(runtime_assets, "LIFE BONUS", "-{s}", .{ui_formatting.formatTimeMmSs(&life_buf, breakdown.life_bonus_ms)}, right_label_x, right_value_x, panel.y + 122.0, questResultsBreakdownRowColor(results, 1, false));
+        drawResultsCompactStatFmt(runtime_assets, "PERK BONUS", "-{s}", .{ui_formatting.formatTimeMmSs(&perk_buf, breakdown.unpicked_perk_bonus_ms)}, right_label_x, right_value_x, panel.y + 148.0, questResultsBreakdownRowColor(results, 2, false));
+        drawResultsCompactStat(runtime_assets, "FINAL", ui_formatting.formatTimeMmSs(&final_buf, breakdown.final_time_ms), right_label_x, right_value_x, panel.y + 174.0, questResultsBreakdownRowColor(results, 3, true));
+    }
+
+    var unlock_y = panel.y + 236.0;
+    if (results.quest_unlock_weapon_name) |name| {
+        drawResultsCompactStat(runtime_assets, "UNLOCK", name, left_label_x, left_value_x, unlock_y, HudTextColor.accent);
+        unlock_y += 24.0;
+    }
+    if (results.quest_unlock_perk_name) |name| {
+        drawResultsCompactStat(runtime_assets, "UNLOCK", name, left_label_x, left_value_x, unlock_y, HudTextColor.accent);
+    }
+}
+
+fn drawResultsCompactScore(
+    runtime_assets: *const window_assets.RuntimeAssets,
+    results: *const ResultsScreen,
+    highscore: ?*const ResultsHighscoreState,
+    screen_width: f32,
+) void {
+    const panel = drawResultsCompactPanel(runtime_assets, "FINAL SCORE", resultsSubtitleFor(results), screen_width);
+    if (highscore) |score| {
+        drawResultsHighscore(runtime_assets, results, score, resultsNamePrompt(results));
+    } else if (results.score_too_low_for_top100) {
+        drawSmallTextCenteredAtX(runtime_assets, "Score too low for top100.", panel.x + panel.width * 0.5, panel.y + 86.0, rl.Color.init(200, 200, 200, 255));
+        if (results.score_too_low_record) |record| {
+            drawResultsScoreRecordCardAt(
+                runtime_assets,
+                results,
+                &record,
+                persistence.highscores.table_max,
+                resultsSavedScoreCardPosForTimeline(results, screen_width, results.timeline_ms),
+                !isQuestCompletedResult(results),
+            );
+        }
+    } else {
+        drawSmallTextCenteredAtX(runtime_assets, "No high score recorded.", panel.x + panel.width * 0.5, panel.y + 132.0, HudTextColor.dim);
+    }
+}
+
+fn drawResultsCompactStat(
+    runtime_assets: *const window_assets.RuntimeAssets,
+    label: []const u8,
+    value: []const u8,
+    label_x: f32,
+    value_x: f32,
+    y: f32,
+    value_color: rl.Color,
+) void {
+    drawSmallText(runtime_assets, label, label_x, y, HudTextColor.dim);
+    drawSmallText(runtime_assets, value, value_x, y, value_color);
+}
+
+fn drawResultsCompactStatFmt(
+    runtime_assets: *const window_assets.RuntimeAssets,
+    label: []const u8,
+    comptime fmt: []const u8,
+    args: anytype,
+    label_x: f32,
+    value_x: f32,
+    y: f32,
+    value_color: rl.Color,
+) void {
+    drawSmallText(runtime_assets, label, label_x, y, HudTextColor.dim);
+    drawSmallTextFmt(fmt, runtime_assets, args, value_x, y, value_color);
 }
 
 fn drawResultsHighscore(
