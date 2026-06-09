@@ -1,12 +1,12 @@
 {
   "version": 2,
-  "name": "crimson",
+  "name": "crimsonland",
   "items": [
     "crimson.sh",
     "crimson/"
   ],
   "attr": {
-    "title": "Crimsonland (Zig)",
+    "title": "Crimsonland",
     "desc": "Downstream PortMaster handheld build of the native Zig Crimsonland rewrite.",
     "inst": "Place crimson.paq and sfx.paq in crimson/assets; music.paq is optional. Launch crimson.sh from PortMaster.",
     "genres": [

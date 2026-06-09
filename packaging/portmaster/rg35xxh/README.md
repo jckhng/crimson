@@ -1,4 +1,4 @@
-# Crimson PortMaster package scaffold
+# Crimsonland PortMaster package scaffold
 
 This template is staged by `scripts/portmaster/build_zig_aarch64_bundle.sh`.
 It is intended for the downstream PortMaster branch/fork, not as a
@@ -14,10 +14,21 @@ local testing only, pass `--assets-dir` to the package script:
 
 Runtime files are written under `crimson/runtime/`.
 
+## Attribution and redistribution
+
+Crimsonland is the original game by 10tons Ltd. This package is an independent
+community PortMaster build of the native Zig reimplementation from the Crimson
+rewrite project. It is not an official 10tons release.
+
 Do not include Crimsonland data archives in public PortMaster release zips
 unless you have explicit redistribution permission. This includes demo archives;
 public packages should ship with an empty `crimson/assets/` directory and let
 users provide their own `.paq` files.
+
+The upstream Crimson rewrite README says the original Crimsonland Classic assets
+are distributed for that project with permission from the original developer.
+That permission should not be assumed to cover third-party PortMaster release
+zips unless the release owner has verified it.
 
 New runtime configs default to left-stick movement and right-stick aim/fire.
 Controls use `crimson.gptk` by default for keyboard/menu fallbacks, but

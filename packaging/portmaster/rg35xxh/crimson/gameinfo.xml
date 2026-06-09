@@ -2,7 +2,7 @@
 <gameList>
   <game>
     <path>./crimson.sh</path>
-    <name>Crimsonland (Zig)</name>
+    <name>Crimsonland</name>
     <desc>PortMaster package for the native Zig Crimsonland rewrite.</desc>
     <genre>Shooter</genre>
     <developer>Crimson Rewrite Contributors</developer>
