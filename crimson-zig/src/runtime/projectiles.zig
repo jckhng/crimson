@@ -86,7 +86,9 @@ pub const ProjectilePool = struct {
             .angle = angle,
             .pos = .{ .x = pos.x, .y = pos.y },
             .origin = .{ .x = pos.x, .y = pos.y },
-            .vel = runtime_helpers.directionFromHeading(angle).mul(1.5),
+            // Native writes vel = (cos(angle), sin(angle)) * 1.5 - the raw
+            // trig components, not the heading-rotated direction.
+            .vel = .{ .x = narrowF32(@cos(angle) * 1.5), .y = narrowF32(@sin(angle) * 1.5) },
             .type_id = type_id,
             .life_timer = 0.4,
             .reserved = 0.0,
@@ -357,15 +359,22 @@ pub const ProjectilePool = struct {
                 }
 
                 const owner_player_idx = proj.owner.playerIndexInBounds(players.len);
-                const owner_player = if (owner_player_idx) |idx| &players[idx] else null;
                 const presentation_player = if (owner_player_idx) |idx| &players[idx] else if (players.len > 0) &players[0] else null;
 
-                if (owner_player) |player| {
+                // Native gates on the global perk count, so the rand is drawn for
+                // every projectile hit while any player owns the perk - including
+                // creature-owned projectiles such as splitter children.
+                var poison_bullets_active = false;
+                for (players) |*player| {
                     if (perks.perkActive(player, PerkId.poison_bullets)) {
-                        const poison_roll = state.rng.randTagged(rng_callers.projectile_update_poison_bullets_gate);
-                        if ((poison_roll & 7) == 1) {
-                            creatures.entries[hit_idx.?].flags |= spawn_mod.CreatureFlags.self_damage_tick;
-                        }
+                        poison_bullets_active = true;
+                        break;
+                    }
+                }
+                if (poison_bullets_active) {
+                    const poison_roll = state.rng.randTagged(rng_callers.projectile_update_poison_bullets_gate);
+                    if ((poison_roll & 7) == 1) {
+                        creatures.entries[hit_idx.?].flags |= spawn_mod.CreatureFlags.self_damage_tick;
                     }
                 }
                 if (presentation_player) |player| {
@@ -382,9 +391,13 @@ pub const ProjectilePool = struct {
                     );
                 }
 
-                if (owner_player_idx) |idx| {
-                    if (idx < state.shots_hit.len and creature_lifecycle.isAlive(creatures.entries[hit_idx.?].lifecycle_stage)) {
-                        state.shots_hit[idx] += 1;
+                // Native increments the global shots-hit counter for any owner
+                // (creature-owned splitter children included); non-player owners
+                // map to the player-1 global slot.
+                {
+                    const hit_slot: usize = owner_player_idx orelse 0;
+                    if (hit_slot < state.shots_hit.len and creature_lifecycle.isAlive(creatures.entries[hit_idx.?].lifecycle_stage)) {
+                        state.shots_hit[hit_slot] += 1;
                     }
                 }
 
@@ -395,11 +408,11 @@ pub const ProjectilePool = struct {
                 {
                     proj.life_timer = 0.25;
                     const jitter = @as(f32, @floatFromInt(state.rng.randTagged(rng_callers.projectile_update_stop_on_hit_jitter) & 3));
-                    const jitter_dx = narrowF32(@as(f32, @floatCast(dir_x_ext * @as(f64, @floatCast(jitter)))));
-                    const jitter_dy = narrowF32(@as(f32, @floatCast(dir_y_ext * @as(f64, @floatCast(jitter)))));
+                    // Native computes `cos * jitter + pos` in extended precision
+                    // with a single f32 spill on the sum.
                     proj.pos = .{
-                        .x = narrowF32(proj.pos.x + jitter_dx),
-                        .y = narrowF32(proj.pos.y + jitter_dy),
+                        .x = @floatCast(dir_x_ext * @as(f64, jitter) + @as(f64, proj.pos.x)),
+                        .y = @floatCast(dir_y_ext * @as(f64, jitter) + @as(f64, proj.pos.y)),
                     };
                 }
 
@@ -489,14 +502,9 @@ pub const ProjectilePool = struct {
                     }
                 }
 
-                // Native `projectile_update` spawns one freeze shard for non-gauss/non-fire
-                // projectile hits while Freeze bonus is active.
-                if (state.bonuses.freeze > 0.0 and
-                    proj.type_id != @intFromEnum(game_ids.ProjectileTypeId.gauss_gun) and
-                    proj.type_id != @intFromEnum(game_ids.ProjectileTypeId.fire_bullets))
-                {
-                    effects.spawnFreezeShard(state, proj.pos, proj.angle, detail_preset);
-                }
+                // The default single freeze shard is presentation: it spawns inside
+                // the post-hit decal branch, after the burn draw, in
+                // emitProjectileHitPresentationPost.
 
                 if (proj.damage_pool == 1.0) {
                     const life_before = proj.life_timer;
@@ -650,12 +658,17 @@ fn emitProjectileHitPresentationPre(
         }
     }
 
+    // Native wraps the splatter block (including its spread / reverse-gate rand
+    // draws) in `if (config_violence_disabled == '\0')`; the bloody-mess decal
+    // loop below runs regardless of the violence setting.
     if (perks.perkActive(player, PerkId.bloody_mess_quick_learner)) {
-        for (0..8) |_| {
-            const spread = (@as(f32, @floatFromInt(state.rng.randTagged(rng_callers.projectile_update_bloody_mess_spread) & 0x1f)) - 16.0) * 0.0625;
-            effects.spawnBloodSplatter(state, hit_pos, base_angle + spread, 0.0, detail_preset, state.gore_disabled);
+        if (state.gore_disabled == 0) {
+            for (0..8) |_| {
+                const spread = (@as(f32, @floatFromInt(state.rng.randTagged(rng_callers.projectile_update_bloody_mess_spread) & 0x1f)) - 16.0) * 0.0625;
+                effects.spawnBloodSplatter(state, hit_pos, base_angle + spread, 0.0, detail_preset, state.gore_disabled);
+            }
+            effects.spawnBloodSplatter(state, hit_pos, base_angle + std.math.pi, 0.0, detail_preset, state.gore_disabled);
         }
-        effects.spawnBloodSplatter(state, hit_pos, base_angle + std.math.pi, 0.0, detail_preset, state.gore_disabled);
 
         var lo: i32 = -30;
         var hi: i32 = 30;
@@ -672,7 +685,7 @@ fn emitProjectileHitPresentationPre(
             lo -= 10;
             hi += 10;
         }
-    } else if (!freeze_active) {
+    } else if (!freeze_active and state.gore_disabled == 0) {
         for (0..2) |_| {
             effects.spawnBloodSplatter(state, hit_pos, base_angle, 0.0, detail_preset, state.gore_disabled);
             if ((state.rng.randTagged(rng_callers.projectile_update_default_reverse_splatter_gate) & 7) == 2) {
@@ -703,7 +716,13 @@ fn emitProjectileHitPresentationPost(
         queueLargeHitStreakDecal(state, hit_target, base_angle, effects, terrain_fx, detail_preset);
         return;
     }
-    if (freeze_active) return;
+    if (freeze_active) {
+        // Native: with Freeze active, default hits spawn one freeze shard here,
+        // after the burn draw, instead of the streak decal loop.
+        const shard_angle = base_angle + @as(f32, @floatFromInt(state.rng.randTagged(rng_callers.projectile_update_default_freeze_shard_angle) % 100)) * 0.01;
+        effects.spawnFreezeShard(state, hit_pos, shard_angle, detail_preset);
+        return;
+    }
 
     var streak_idx: usize = 0;
     while (streak_idx < 3) : (streak_idx += 1) {
@@ -960,7 +979,10 @@ fn postHitIonRifleShockChain(
 
     const origin_creature = creatures.entries[hit_idx];
     const target = creatures.entries[best_idx];
-    const angle = state_mod.Vec2.sub(target.pos, origin_creature.pos).toHeading();
+    // Native stores (float)(atan2(dy, dx) - 1.5707964 - 3.1415927) with a
+    // single f32 spill (differs from toHeading() by 2*pi).
+    const delta = state_mod.Vec2.sub(target.pos, origin_creature.pos);
+    const angle: f32 = @floatCast(std.math.atan2(@as(f64, delta.y), @as(f64, delta.x)) - @as(f64, native_half_pi) - @as(f64, native_math.roundF32(native_math.native_pi)));
 
     const prev_guard = state.bonus_spawn_guard;
     state.bonus_spawn_guard = true;

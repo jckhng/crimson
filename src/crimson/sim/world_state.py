@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import cast
 
 import msgspec
@@ -25,11 +26,14 @@ from ..gameplay import (
     survival_progression_update,
 )
 from ..owner_ref import OwnerRef
+from ..perks import PerkId
+from ..perks.helpers import perk_active
 from ..perks.runtime.effects import perks_update_effects
 from ..perks.runtime.manifest import PLAYER_DEATH_HOOKS, WORLD_DT_STEPS
 from ..player_damage import PlayerDeathRuntime, player_take_projectile_damage
 from ..projectiles.runtime import PrimaryStepCtx, ProjectileHitRuntime, ProjectileUpdateOptions, SecondaryStepCtx
 from ..projectiles.types import ProjectileHit
+from ..rng_caller_static import RngCallerStatic
 from .input import PlayerInput
 from .input_frame import normalize_input_frame
 from .presentation_step import (
@@ -113,7 +117,11 @@ class _WorldStepRuntime(ProjectileHitRuntime, CreatureDamageRuntime, PlayerDeath
             creature_damage_runtime=self,
         )
 
-    def on_creature_lethal(self, creature_index: int, death_sfx: tuple[SfxId, ...]) -> None:
+    def on_creature_lethal(
+        self,
+        creature_index: int,
+        resolve_death_sfx: Callable[[], tuple[SfxId, ...]],
+    ) -> None:
         self.world._record_creature_death(
             creature_index=int(creature_index),
             dt=float(self.dt),
@@ -122,7 +130,7 @@ class _WorldStepRuntime(ProjectileHitRuntime, CreatureDamageRuntime, PlayerDeath
             fx_queue=self.fx_queue,
             deaths=self.deaths,
             sfx=self.sfx,
-            death_sfx=death_sfx,
+            resolve_death_sfx=resolve_death_sfx,
         )
 
     def on_secondary_detonation_kill(self, creature_index: int) -> None:
@@ -168,6 +176,21 @@ class _WorldStepRuntime(ProjectileHitRuntime, CreatureDamageRuntime, PlayerDeath
             self.hit_audio_game_tune_started = True
         if keys:
             self.hit_sfx.extend(keys)
+
+    def play_secondary_rocket_hit_audio(self) -> None:
+        # Native secondary-rocket hits run the same first-hit game-tune branch
+        # as bullet hits: sfx_play_exclusive(music_track_extra_0) plus one
+        # playlist rand outside demo/rush, else the panned explosion sound.
+        if (
+            (not self.world.state.demo_mode_active)
+            and self.game_mode != GameMode.RUSH
+            and not self.hit_audio_game_tune_started
+        ):
+            self.trigger_game_tune = True
+            self.hit_audio_game_tune_started = True
+            _ = self.world.state.rng.rand_tagged(RngCallerStatic.SFX_PLAY_EXCLUSIVE_PLAYLIST_PICK)
+            return
+        self.hit_sfx.append(SfxId.EXPLOSION_MEDIUM)
 
     def begin_hit_presentation(self, hit: ProjectileHit) -> ProjectileDecalPostCtx:
         return self.prepare_projectile_hit_presentation(hit)
@@ -344,6 +367,7 @@ class WorldState(msgspec.Struct):
                 fx_queue=fx_queue,
                 detail_preset=int(detail_preset),
                 creature_damage_runtime=step_runtime,
+                play_rocket_hit_audio=step_runtime.play_secondary_rocket_hit_audio,
             ),
         )
         self._run_post_damage_player_death_hooks(
@@ -355,6 +379,9 @@ class WorldState(msgspec.Struct):
             deaths=step_runtime.deaths,
         )
 
+        # Native updates the sprite pool before the particle loop, so sprites
+        # spawned by particles only advance on the next tick.
+        self.state.sprite_effects.update(dt)
         self.state.particles.update(
             dt,
             creatures=self.creatures.entries,
@@ -362,7 +389,6 @@ class WorldState(msgspec.Struct):
             fx_queue=fx_queue,
             sprite_effects=self.state.sprite_effects,
         )
-        self.state.sprite_effects.update(dt)
         reload_active_any = any(bool(entry.reload_down) or bool(entry.reload_pressed) for entry in inputs)
         player_dt = float(dt)
         if dt_player_local is not None:
@@ -497,7 +523,7 @@ class WorldState(msgspec.Struct):
         deaths: list[CreatureDeath],
         keep_corpse: bool = True,
         sfx: list[SfxId],
-        death_sfx: tuple[SfxId, ...] = (),
+        resolve_death_sfx: Callable[[], tuple[SfxId, ...]] | None = None,
     ) -> None:
         death = self.creatures.handle_death(
             int(creature_index),
@@ -512,7 +538,8 @@ class WorldState(msgspec.Struct):
             keep_corpse=bool(keep_corpse),
         )
         deaths.append(death)
-        sfx.extend(death_sfx)
+        if resolve_death_sfx is not None:
+            sfx.extend(resolve_death_sfx())
 
     def _prepare_projectile_hit_presentation(
         self,
@@ -547,7 +574,25 @@ class WorldState(msgspec.Struct):
     def _advance_creature_anim(self, dt: float) -> None:
         if float(self.state.bonuses.freeze) > 0.0:
             return
-        for creature in self.creatures.entries:
+        # Native advances anim phase inside `if (idx != evil_eyes_target)`:
+        # the frozen creature's walk cycle halts along with its movement.
+        evil_targets: set[int] = set()
+        if self.players:
+            if bool(self.state.preserve_bugs):
+                if perk_active(self.players[0], PerkId.EVIL_EYES):
+                    evil_target = int(self.players[0].evil_eyes_target_creature)
+                    if evil_target >= 0:
+                        evil_targets.add(evil_target)
+            else:
+                for player in self.players:
+                    if float(player.health) <= 0.0 or not perk_active(player, PerkId.EVIL_EYES):
+                        continue
+                    evil_target = int(player.evil_eyes_target_creature)
+                    if evil_target >= 0:
+                        evil_targets.add(evil_target)
+        for idx, creature in enumerate(self.creatures.entries):
+            if idx in evil_targets:
+                continue
             if not (creature.active and creature.hp > 0.0):
                 continue
             type_id = creature.type_id

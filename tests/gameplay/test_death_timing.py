@@ -522,14 +522,16 @@ def test_freeze_hit_path_triggers_tune_and_skips_hit_sfx(mocker) -> None:
     )
 
     assert plan_hit_sfx.call_count == 1
+    # Freeze-active hits draw the post-hit burn rand, then the default freeze
+    # shard angle plus the shard spawn draws (native order: burn before shard).
     assert_rng_progression(
         rng,
         before_calls=before_calls,
         before_state=before_state,
-        expected_draws=2,
+        expected_draws=9,
         expected_after_state=0,
     )
-    assert rng.values_since(before_calls) == [0] * 2
+    assert rng.values_since(before_calls) == [0] * 9
     assert events.hit_sfx == []
     assert events.trigger_game_tune is True
 
@@ -578,3 +580,51 @@ def test_perk_effects_step_uses_previous_aim_before_player_update() -> None:
 
     assert seen["aim"] == Vec2(128.0, 256.0)
     assert player.aim == Vec2(900.0, 900.0)
+
+
+def test_first_secondary_rocket_hit_triggers_game_tune() -> None:
+    from crimson.projectiles.runtime import SecondarySpawnSpec
+    from crimson.projectiles.types import SecondaryProjectileTypeId
+
+    world_size = 1024.0
+    world = WorldState.build(
+        world_size=world_size,
+        demo_mode_active=False,
+        hardcore=False,
+        quest_fail_retry_count=0,
+    )
+    world.players.append(PlayerState(index=0, pos=Vec2(512.0, 512.0)))
+
+    creature = world.creatures.entries[0]
+    creature.active = True
+    creature.pos = Vec2(100.0, 100.0)
+    creature.hp = 1000.0
+    creature.max_hp = 1000.0
+    creature.size = 50.0
+
+    world.state.secondary_projectiles.spawn_from_spec(
+        SecondarySpawnSpec(
+            pos=Vec2(100.0, 100.0),
+            angle=0.0,
+            type_id=SecondaryProjectileTypeId.ROCKET,
+            owner=OwnerRef.from_player(0),
+        ),
+    )
+
+    events = world.step(
+        0.016,
+        inputs=[PlayerInput()],
+        world_size=world_size,
+        damage_scale_by_type={},
+        detail_preset=5,
+        fx_queue=FxQueue(),
+        fx_queue_rotated=FxQueueRotated(),
+        game_mode=GameMode.SURVIVAL,
+        perk_progression_enabled=False,
+    )
+
+    # Native secondary-rocket hits run the same first-hit game-tune branch as
+    # bullet hits instead of the panned explosion sound.
+    assert events.trigger_game_tune is True
+    assert SfxId.EXPLOSION_MEDIUM not in world.state.sfx_queue
+    assert SfxId.EXPLOSION_MEDIUM not in events.hit_sfx

@@ -141,7 +141,8 @@ class ProjectilePool:
             float(f32(math.sin(float(angle_f32)) * 1.5)),
         )
         entry.type_id = type_id
-        entry.life_timer = 0.4
+        # Native stores the f32 literal 0.4.
+        entry.life_timer = float(f32(0.4))
         entry.reserved = 0.0
         entry.speed_scale = 1.0
         entry.travel_budget = float(travel_budget)
@@ -183,6 +184,7 @@ class ProjectilePool:
 
         barrel_greaser_active = False
         ion_gun_master_active = False
+        poison_bullets_active = False
         ion_scale = float(ion_aoe_scale)
         poison_idx = int(PerkId.POISON_BULLETS)
         barrel_idx = int(PerkId.BARREL_GREASER)
@@ -194,18 +196,11 @@ class ProjectilePool:
                 barrel_greaser_active = True
             if 0 <= ion_idx < len(perk_counts) and int(perk_counts[ion_idx]) > 0:
                 ion_gun_master_active = True
-            if barrel_greaser_active and ion_gun_master_active:
-                break
+            if 0 <= poison_idx < len(perk_counts) and int(perk_counts[poison_idx]) > 0:
+                poison_bullets_active = True
 
         if ion_scale == 1.0 and ion_gun_master_active:
             ion_scale = 1.2
-
-        def _owner_perk_active(owner: OwnerRef, perk_idx: int) -> bool:
-            player_index = owner.player_index_in_bounds(len(players))
-            if player_index is None:
-                return False
-            perk_counts = players[player_index].perk_counts
-            return 0 <= perk_idx < len(perk_counts) and int(perk_counts[perk_idx]) > 0
 
         effects: EffectPool | None = runtime_state.effects
         sfx_queue: MutableSequence[SfxId] | None = runtime_state.sfx_queue
@@ -257,6 +252,7 @@ class ProjectilePool:
             effects=effects,
             sfx_queue=sfx_queue,
             creature_damage_runtime=creature_damage_runtime,
+            sync_creature_index=creature_spatial.sync_index,
         )
 
         def _reset_shock_chain_if_owner(index: int) -> None:
@@ -402,18 +398,21 @@ class ProjectilePool:
                         proj=proj,
                         creature=creature,
                         rng=rng,
-                        owner_perk_active=_owner_perk_active,
-                        poison_idx=poison_idx,
+                        poison_bullets_active=poison_bullets_active,
                     )
                     for hook in _PROJECTILE_HIT_PERK_HOOKS:
                         hook(perk_ctx)
 
                     rule.pre_hit(update_ctx, proj, int(hit_idx))
 
+                    # Native increments the global shots-hit counter for any
+                    # owner (creature-owned splitter children included) when the
+                    # target is still at the alive sentinel; non-player owners
+                    # map to the player-1 global slot.
                     owner_player_index = proj.owner.player_index_in_bounds(len(runtime_state.shots_hit))
-                    if owner_player_index is not None and creature_lifecycle_is_alive(creature.lifecycle_stage):
+                    if creature_lifecycle_is_alive(creature.lifecycle_stage) and runtime_state.shots_hit:
                         shots_hit = runtime_state.shots_hit
-                        shots_hit[owner_player_index] += 1
+                        shots_hit[owner_player_index if owner_player_index is not None else 0] += 1
 
                     target = creature.pos
                     hit = ProjectileHit(
@@ -428,11 +427,11 @@ class ProjectilePool:
                     if proj.life_timer != 0.25 and rule.stop_on_hit:
                         proj.life_timer = 0.25
                         jitter = rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_STOP_ON_HIT_JITTER) & 3
-                        jitter_dx = float(f32(float(dir_x) * float(jitter)))
-                        jitter_dy = float(f32(float(dir_y) * float(jitter)))
+                        # Native computes `cos * jitter + pos` in extended
+                        # precision with a single f32 spill on the sum.
                         proj.pos = Vec2(
-                            float(f32(float(proj.pos.x) + float(jitter_dx))),
-                            float(f32(float(proj.pos.y) + float(jitter_dy))),
+                            float(f32(float(dir_x) * float(jitter) + float(proj.pos.x))),
+                            float(f32(float(dir_y) * float(jitter) + float(proj.pos.y))),
                         )
 
                     dist = _damage_distance_f32(proj.origin, proj.pos)
@@ -485,26 +484,10 @@ class ProjectilePool:
                             creature_spatial.sync_index(int(hit_idx))
                             proj.damage_pool -= float(creature.hp)
 
-                    # Native `projectile_update` has separate freeze-hit ownership for
-                    # primary and secondary projectiles. This branch is the default
-                    # primary-projectile single-shard path (`crt_rand` @ 0x4215fa ->
-                    # caller_static 0x4215ff). Secondary rocket-style `% 612` shard
-                    # loops live in the secondary projectile update path instead.
-                    if (
-                        float(runtime_state.bonuses.freeze) > 0.0
-                        and effects is not None
-                        and rule.emit_default_freeze_shard
-                    ):
-                        shard_angle = float(float(proj.angle) - NATIVE_HALF_PI)
-                        shard_angle += float(
-                            rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_DEFAULT_FREEZE_SHARD_ANGLE) % 100,
-                        ) * 0.01
-                        effects.spawn_freeze_shard(
-                            pos=proj.pos,
-                            angle=float(shard_angle),
-                            rng=rng,
-                            detail_preset=int(detail_preset),
-                        )
+                    # The default single freeze shard (`crt_rand` @ 0x4215fa ->
+                    # caller_static 0x4215ff) is presentation: it spawns inside the
+                    # post-hit decal branch, after the burn draw, in
+                    # `queue_projectile_decals_post_hit`.
 
                     if proj.damage_pool == 1.0:
                         # Native clears damage_pool to 0.0 whenever it's exactly 1.0

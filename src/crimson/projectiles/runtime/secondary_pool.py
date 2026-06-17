@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import MutableSequence, Sequence
+from collections.abc import Callable, MutableSequence, Sequence
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -16,7 +16,7 @@ from ...creatures.damage_types import CreatureDamageType
 from ...creatures.lifecycle import creature_lifecycle_is_alive, creature_lifecycle_is_collidable
 from ...effects import EffectPool, FxQueue, SpriteEffectPool
 from ...effects_atlas import EffectId
-from ...math_parity import f32
+from ...math_parity import NATIVE_HALF_PI, f32
 from ...owner_ref import OwnerRef
 from ...rng_caller_static import RngCallerStatic
 from ..types import (
@@ -73,6 +73,10 @@ class SecondaryStepCtx(msgspec.Struct, frozen=True):
     fx_queue: FxQueue | None = None
     detail_preset: int = 5
     creature_damage_runtime: CreatureDamageRuntime | None = None
+    # Native secondary-rocket hits run the same first-hit game-tune branch as
+    # bullet hits (sfx_play_exclusive + one playlist rand) outside demo/rush;
+    # when unset, the plain explosion sound is queued directly.
+    play_rocket_hit_audio: Callable[[], None] | None = None
 
 
 class SecondaryProjectilePool:
@@ -259,27 +263,28 @@ class SecondaryProjectilePool:
             if not isinstance(rule, (RocketRule, HomingRocketRule, RocketMinigunRule)):
                 continue
 
-            # Move.
-            entry.pos = entry.pos + entry.vel * dt
+            # Move. Native keeps pos/vel as f32 fields: `pos += f32(dt * vel)`.
+            entry.pos = Vec2(
+                float(f32(float(entry.pos.x) + float(f32(float(dt) * float(entry.vel.x))))),
+                float(f32(float(entry.pos.y) + float(f32(float(dt) * float(entry.vel.y))))),
+            )
 
             # Update velocity + countdown.
-            speed_mag = entry.vel.length()
+            speed_mag = math.sqrt(float(entry.vel.x) * float(entry.vel.x) + float(entry.vel.y) * float(entry.vel.y))
             match rule:
                 case RocketRule(
                     accel_factor_scale=accel_factor_scale, speed_cap=speed_cap, ttl_decay_scale=ttl_decay_scale,
-                ):
-                    if speed_mag < float(speed_cap):
-                        factor = 1.0 + dt * float(accel_factor_scale)
-                        entry.vel = entry.vel * factor
-                    entry.speed = float(f32(float(entry.speed) - float(dt) * float(ttl_decay_scale)))
-                case RocketMinigunRule(
+                ) | RocketMinigunRule(
                     accel_factor_scale=accel_factor_scale,
                     speed_cap=speed_cap,
                     ttl_decay_scale=ttl_decay_scale,
                 ):
                     if speed_mag < float(speed_cap):
-                        factor = 1.0 + dt * float(accel_factor_scale)
-                        entry.vel = entry.vel * factor
+                        factor = float(f32(float(dt) * float(accel_factor_scale) + 1.0))
+                        entry.vel = Vec2(
+                            float(f32(factor * float(entry.vel.x))),
+                            float(f32(factor * float(entry.vel.y))),
+                        )
                     entry.speed = float(f32(float(entry.speed) - float(dt) * float(ttl_decay_scale)))
                 case HomingRocketRule(
                     target_accel=target_accel, max_velocity=max_velocity, ttl_decay_scale=ttl_decay_scale,
@@ -296,14 +301,42 @@ class SecondaryProjectilePool:
 
                     if 0 <= target_id < len(creatures):
                         target = creatures[target_id]
-                        to_target = target.pos - entry.pos
-                        target_dir, dist = to_target.normalized_with_length()
-                        if dist > 1e-6:
-                            entry.angle = to_target.to_heading()
-                            accel = target_dir * (dt * float(target_accel))
-                            next_velocity = entry.vel + accel
-                            if next_velocity.length() <= float(max_velocity):
-                                entry.vel = next_velocity
+                        # Native steering: angle = atan2(pos - target) kept in
+                        # extended precision; the stored f32 angle is atan - pi/2.
+                        # vel_x adds cos((atan - pi/2) - pi/2) from the extended
+                        # angle; vel_y (and the over-cap subtraction for both
+                        # components) recompute from the stored f32 angle, so the
+                        # add-then-subtract is not an exact identity.
+                        atan_ext = math.atan2(
+                            float(entry.pos.y) - float(target.pos.y),
+                            float(entry.pos.x) - float(target.pos.x),
+                        )
+                        entry.angle = float(f32(atan_ext - float(NATIVE_HALF_PI)))
+                        accel_scale = float(dt) * float(target_accel)
+                        entry.vel = Vec2(
+                            float(
+                                f32(
+                                    math.cos((atan_ext - float(NATIVE_HALF_PI)) - float(NATIVE_HALF_PI))
+                                    * accel_scale
+                                    + float(entry.vel.x),
+                                ),
+                            ),
+                            float(
+                                f32(
+                                    math.sin(float(entry.angle) - float(NATIVE_HALF_PI)) * accel_scale
+                                    + float(entry.vel.y),
+                                ),
+                            ),
+                        )
+                        speed_after = math.sqrt(
+                            float(entry.vel.x) * float(entry.vel.x) + float(entry.vel.y) * float(entry.vel.y),
+                        )
+                        if speed_after > float(max_velocity):
+                            heading = float(entry.angle) - float(NATIVE_HALF_PI)
+                            entry.vel = Vec2(
+                                float(f32(float(entry.vel.x) - math.cos(heading) * accel_scale)),
+                                float(f32(float(entry.vel.y) - math.sin(heading) * accel_scale)),
+                            )
 
                     entry.speed = float(f32(float(entry.speed) - float(dt) * float(ttl_decay_scale)))
 
@@ -313,7 +346,10 @@ class SecondaryProjectilePool:
             if float(entry.trail_timer) < 0.0:
                 direction = Vec2.from_heading(entry.angle)
                 spawn_pos = entry.pos - direction * 9.0
-                trail_velocity = Vec2.from_heading(entry.angle + math.pi) * 90.0
+                # Native bug: both trail velocity components come from cosine
+                # (fcos with no fsin), so the smoke drifts diagonally.
+                trail_cos = math.cos(float(f32(entry.angle)) + NATIVE_HALF_PI)
+                trail_velocity = Vec2(float(f32(trail_cos)) * 90.0, float(f32(trail_cos * 90.0)))
                 if sprite_effects is not None:
                     sprite_effects.spawn(
                         pos=spawn_pos,
@@ -346,7 +382,9 @@ class SecondaryProjectilePool:
                         shots_hit = runtime_state.shots_hit
                         shots_hit[owner_player_index] += 1
 
-                if sfx_queue is not None:
+                if ctx.play_rocket_hit_audio is not None:
+                    ctx.play_rocket_hit_audio()
+                elif sfx_queue is not None:
                     sfx_queue.append(SfxId.EXPLOSION_MEDIUM)
 
                 det_scale = 0.5
@@ -514,9 +552,11 @@ class SecondaryProjectilePool:
                             color=RGBA(1.0, 1.0, 1.0, 0.37),
                         )
 
-                continue
-
-            if entry.speed < 0.0:
+            # Native's TTL check runs after the hit handling in the same
+            # iteration (no early-out): a rocket that hits while its TTL is
+            # already spent gets its detonation scale overwritten to 0.5, and
+            # exactly-zero TTL detonates this tick (<=, not <).
+            if entry.speed <= 0.0:
                 entry.type_id = SecondaryProjectileTypeId.DETONATION
                 entry.vel = Vec2()
                 entry.detonation_t = 0.0

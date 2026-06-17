@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 
 import msgspec
@@ -12,7 +11,7 @@ from grim.sfx_map import SfxId
 
 from ..effects import EffectPool
 from ..effects_atlas import EffectId
-from ..math_parity import f32
+from ..math_parity import NATIVE_HALF_PI, f32
 from ..owner_ref import OwnerRef
 from ..perks import PerkId
 from ..perks.helpers import perk_active
@@ -20,7 +19,7 @@ from ..rng_caller_static import RngCallerStatic
 from ..sim.state_types import PlayerState
 from .damage_runtime import CreatureDamageRuntime
 from .damage_types import CreatureDamageType
-from .runtime import CREATURE_LIFECYCLE_ALIVE, CreatureState
+from .runtime import CreatureState
 from .spawn import CreatureFlags, CreatureTypeId
 
 
@@ -127,8 +126,9 @@ def _damage_type1_heading_jitter(ctx: _CreatureDamageCtx) -> None:
     jitter = float((ctx.rng.rand_tagged(RngCallerStatic.CREATURE_APPLY_DAMAGE_HEADING_JITTER) & 0x7F) - 0x40) * 0.002
     size = max(1e-6, float(creature.size))
     turn = jitter / (size * 0.025)
-    turn = min(math.pi / 2.0, turn)
-    creature.heading += turn
+    # Native clamps against the f32 literal 1.5707964 and stores the sum f32.
+    turn = min(float(NATIVE_HALF_PI), turn)
+    creature.heading = float(f32(turn + float(creature.heading)))
 
 
 def _damage_type7_ion_gun_master(ctx: _CreatureDamageCtx) -> None:
@@ -229,15 +229,14 @@ def creature_apply_damage(
     dt: float,
     players: list[PlayerState],
     rng: CrandLike,
-    effects: EffectPool | None = None,
-    detail_preset: int = 5,
 ) -> bool:
     """Apply damage to a creature, returning True if the hit killed it.
 
     This is a partial port of `creature_apply_damage` (FUN_004207c0).
 
     Notes:
-    - Death side-effects are handled by the caller.
+    - Death side-effects (handle_death, then shock burst / death SFX) are handled
+      by the caller in native order.
     - `damage_type` is a native integer category; call sites must supply it.
     """
 
@@ -284,12 +283,6 @@ def creature_apply_damage(
         else:
             creature.lifecycle_stage = float(f32(float(creature.lifecycle_stage) - 0.001))
         creature.vel = creature.vel - impulse * 2.0
-        _damage_lethal_ranged_shock_burst(
-            creature=creature,
-            rng=rng,
-            effects=effects,
-            detail_preset=int(detail_preset),
-        )
         return True
 
     return False
@@ -317,7 +310,10 @@ def creature_apply_damage_with_lethal_followup(
     call sites cannot accidentally skip death handling side effects.
     """
 
-    death_start_needed = float(creature.hp) > 0.0 and float(creature.lifecycle_stage) == CREATURE_LIFECYCLE_ALIVE
+    # Native gates the lethal branch purely on entry health; a creature whose
+    # death was already handled with hp still positive (shrinkifier shrink-death,
+    # energizer eat) re-enters the full lethal follow-up on a later killing hit.
+    death_start_needed = float(creature.hp) > 0.0
     killed = creature_apply_damage(
         creature,
         damage_amount=float(damage_amount),
@@ -327,13 +323,20 @@ def creature_apply_damage_with_lethal_followup(
         dt=float(dt),
         players=players,
         rng=rng,
-        effects=effects,
-        detail_preset=int(detail_preset),
     )
     if killed and death_start_needed:
-        creature_damage_runtime.on_creature_lethal(
-            int(creature_index),
-            resolve_native_death_sfx(creature, rng=rng, preserve_bugs=preserve_bugs),
-        )
+
+        def _resolve_death_sfx() -> tuple[SfxId, ...]:
+            # Native lethal order: `creature_handle_death` runs first, then either the
+            # shock-burst rand loop (`flags & 0x10`) or the death-SFX rand draw.
+            _damage_lethal_ranged_shock_burst(
+                creature=creature,
+                rng=rng,
+                effects=effects,
+                detail_preset=int(detail_preset),
+            )
+            return resolve_native_death_sfx(creature, rng=rng, preserve_bugs=preserve_bugs)
+
+        creature_damage_runtime.on_creature_lethal(int(creature_index), _resolve_death_sfx)
         return True
     return False

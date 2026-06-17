@@ -403,7 +403,7 @@ def test_ai_mode5_near_link_scales_runtime_movement_delta() -> None:
     assert_float_close(near.move_scale, 50.0 * 0.015625)
     assert_float_close(far.move_scale, 1.0)
     assert near_step < far_step
-    assert_float_close(far_step, 0.9999996536134259)
+    assert_float_close(far_step, 0.9999993146409377)
     assert_float_close(near_step, 0.7812510393925548)
 
 
@@ -1840,3 +1840,34 @@ def test_evil_eyes_default_freezes_targets_from_multiple_players() -> None:
     assert creature1.vel == Vec2(2.0, -3.0)
     assert creature0.force_target == 0
     assert creature1.force_target == 0
+
+
+def test_bonus_on_death_drop_emits_native_burst_and_clamps_corpse() -> None:
+    state = GameplayState()
+    state.bonus_spawn_guard = True
+    pool = CreaturePool()
+
+    creature = pool.entries[0]
+    creature.active = True
+    creature.flags = CreatureFlags.BONUS_ON_DEATH
+    creature.bonus_id = BonusId.POINTS
+    creature.bonus_duration_override = 5
+    creature.pos = Vec2(5.0, 1010.0)
+    creature.hp = 0.0
+
+    pool.handle_death(
+        0,
+        state=state,
+        players=[],
+        rng=state.rng,
+        world_width=1024.0,
+        world_height=1024.0,
+        fx_queue=None,
+    )
+
+    # Native bonus_spawn_at clamps the corpse position through the pointer and
+    # always spawns a 16-particle burst (4 crt_rand draws each).
+    assert creature.pos == Vec2(32.0, 992.0)
+    assert len(state.effects.iter_active()) == 16
+    entry = next(e for e in state.bonus_pool.entries if e.bonus_id == BonusId.POINTS)
+    assert entry.pos == Vec2(32.0, 992.0)

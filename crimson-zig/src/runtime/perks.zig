@@ -387,7 +387,10 @@ pub fn applyPerkWithContext(
         PerkId.thick_skinned => {
             for (players) |*player| {
                 if (player.health > 0.0) {
-                    player.health = @max(1.0, player.health * (2.0 / 3.0));
+                    // Native computes `h - h * 0.33333334f` and stores f32. Its
+                    // `= 1.0` clamp only fires when the result is <= 0, which
+                    // cannot happen for positive health - dead code, no floor.
+                    player.health = narrowF32(player.health - player.health * 0.33333334);
                 }
             }
         },
@@ -430,23 +433,26 @@ pub fn applyPerkWithContext(
         PerkId.bandage => {
             var effects: effects_mod.EffectPool = .{};
             for (players) |*player| {
-                if (player.health > 0.0) {
-                    const amount: f32 = @floatFromInt(state.rng.randTagged(rng_callers.perk_apply_bandage_heal) % 50 + 1);
-                    if (state.preserve_bugs) {
-                        player.health = @min(100.0, narrowF32(player.health * amount));
-                    } else {
-                        player.health = @min(100.0, narrowF32(player.health + amount));
-                    }
-                    effects.spawnBurst(
-                        state,
-                        player.pos,
-                        8,
-                        5,
-                        0.4,
-                        null,
-                        .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
-                    );
+                // The native loop has no alive gate: dead players consume the
+                // rand, have their negative health multiplied, and spawn a burst
+                // at the corpse. Default mode keeps the documented fix of
+                // healing only alive players (original-bugs.md item 3).
+                if (!state.preserve_bugs and player.health <= 0.0) continue;
+                const amount: f32 = @floatFromInt(state.rng.randTagged(rng_callers.perk_apply_bandage_heal) % 50 + 1);
+                if (state.preserve_bugs) {
+                    player.health = @min(100.0, narrowF32(player.health * amount));
+                } else {
+                    player.health = @min(100.0, narrowF32(player.health + amount));
                 }
+                effects.spawnBurst(
+                    state,
+                    player.pos,
+                    8,
+                    5,
+                    0.4,
+                    null,
+                    .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+                );
             }
         },
         PerkId.lifeline_50_50 => applyPerkImmediateCreatureEffects(perk_id, state, context),
@@ -696,7 +702,9 @@ pub fn applyJinxedEffects(
     creatures.entries[idx].lifecycle_stage = narrowF32(
         creatures.entries[idx].lifecycle_stage - dt * 20.0,
     );
-    awardExperienceFromReward(state, &players[0], creatures.entries[idx].reward_value);
+    // Native awards the reward exactly once: the Jinxed kill branch has no
+    // Double Experience handling, unlike creature_handle_death.
+    _ = awardExperienceOnceFromReward(&players[0], creatures.entries[idx].reward_value);
     state.sfx_queue.append(.trooper_inpain_01);
 }
 
@@ -1579,8 +1587,9 @@ test "thick skinned clamps health floor at one" {
     };
 
     try applyPerk(&state, players[0..], PerkId.thick_skinned);
-    try std.testing.expectApproxEqAbs(@as(f32, 60.0), players[0].health, 1e-6);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), players[1].health, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 60.0), players[0].health, 1e-4);
+    // Native has no health floor: low-health players keep 2/3 of their health.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), players[1].health, 1e-4);
 }
 
 test "plaguebearer apply marks all players active" {

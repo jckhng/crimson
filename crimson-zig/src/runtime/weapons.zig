@@ -242,8 +242,10 @@ pub fn stepPlayerForTickWithEffects(
     }
 
     const has_alt_weapon_perk = perks.perkActive(player, PerkId.alternate_weapon);
+    // Native gates on grim_is_key_active (key held), so holding reload chains
+    // reloads back-to-back as each one completes.
     const manual_reload_allowed =
-        input_flags.reload_pressed and
+        (input_flags.reload_down or input_flags.reload_pressed) and
         !state.demo_mode_active and
         !has_alt_weapon_perk and
         input_flags.move_mode != movement_control_mouse_point_click and
@@ -411,7 +413,11 @@ fn tryFireWeaponWithForce(
     var shot_cooldown = shot_cooldown_base;
 
     const is_fire_bullets = player.fire_bullets_timer > 0.0;
-    var shot_count = computeShotCount(player.weapon.weapon_id, player.weapon.ammo);
+    var shot_count = computeShotCount(player.weapon.weapon_id);
+    // Native increments the accuracy counter only inside projectile_spawn /
+    // fx_spawn_secondary_projectile; particle weapons never count toward
+    // shots fired. Per-weapon usage keeps counting for most-used tracking.
+    var counts_accuracy_shots = true;
     if (is_fire_bullets) {
         shot_count = pellet_count;
     }
@@ -424,7 +430,13 @@ fn tryFireWeaponWithForce(
         player.aim_dir.toHeading();
     const muzzle_dir = rotateVec(directionFromHeading(aim_heading), -0.150915);
     const muzzle = state_mod.Vec2.add(player.pos, muzzle_dir.mul(16.0));
-    const projectile_owner = owner_ref.OwnerRef.fromLocalPlayer(0);
+    // Native encodes friendly fire in the owner id (-1 - player_index): with
+    // the cvar enabled, primary player shots can hit other players.
+    const projectile_owner = if (state.friendly_fire_enabled)
+        owner_ref.OwnerRef.fromPlayer(@intCast(player.index))
+    else
+        owner_ref.OwnerRef.fromLocalPlayer(0);
+    const projectile_hits_players = state.friendly_fire_enabled;
     const secondary_owner = owner_ref.OwnerRef.fromPlayer(@intCast(player.index));
     if (is_fire_bullets and pellet_count == 1) {
         shot_cooldown = weapon_data.weapon_stats.get(fire_bullets_weapon_id).shot_cooldown;
@@ -455,15 +467,23 @@ fn tryFireWeaponWithForce(
         );
     }
 
-    const dist = aim_delta.length();
-    const max_offset = dist * player.spread_heat * 0.5;
+    // Native float sequence: half the f32 aim distance is spilled, the
+    // spread/magnitude product chain stays in extended precision, the jittered
+    // aim x is spilled while y feeds atan2 unspilled, and the heading is
+    // (float)(atan2(pos - jitter) - 1.5707964).
+    const half_len: f32 = aim_delta.length() * 0.5;
     const dir_roll = state.rng.randTagged(rng_callers.player_update_shot_jitter_dir);
-    const dir_angle = @as(f32, @floatFromInt(dir_roll & 0x1ff)) * (native_tau / 512.0);
     const mag_roll = state.rng.randTagged(rng_callers.player_update_shot_jitter_mag);
-    const mag = @as(f32, @floatFromInt(mag_roll & 0x1ff)) * (1.0 / 512.0);
-    const offset = max_offset * mag;
-    const aim_jitter = state_mod.Vec2.add(player.aim, state_mod.Vec2.fromAngle(dir_angle).mul(offset));
-    const shot_angle = state_mod.Vec2.sub(aim_jitter, player.pos).toHeading();
+    const offset_term: f64 = @as(f64, half_len) * @as(f64, player.spread_heat) *
+        @as(f64, @floatFromInt(mag_roll & 0x1ff)) * 0.001953125;
+    const dir_angle: f32 = @as(f32, @floatFromInt(dir_roll & 0x1ff)) * (native_tau / 512.0);
+    const aim_jitter_x: f32 = @floatCast(@cos(@as(f64, dir_angle)) * offset_term + @as(f64, player.aim.x));
+    const aim_jitter_y: f64 = @sin(@as(f64, dir_angle)) * offset_term + @as(f64, player.aim.y);
+    const native_half_pi_f32: f32 = native_math.roundF32(native_math.native_half_pi);
+    const shot_angle: f32 = @floatCast(std.math.atan2(
+        @as(f64, player.pos.y) - aim_jitter_y,
+        @as(f64, player.pos.x) - @as(f64, aim_jitter_x),
+    ) - @as(f64, native_half_pi_f32));
     var particle_angle = directionFromHeading(shot_angle).toAngle();
     if (player.weapon.weapon_id == .flamethrower or player.weapon.weapon_id == .blow_torch or player.weapon.weapon_id == .hr_flamer) {
         particle_angle = directionFromHeading(aim_heading).toAngle();
@@ -503,7 +523,7 @@ fn tryFireWeaponWithForce(
                     type_id_i32,
                     projectile_owner,
                     meta,
-                    false,
+                    projectile_hits_players,
                 );
                 applySpeedScaleRule(state, projectiles, id, player.weapon.weapon_id, is_fire_bullets, mode.speed_scale);
             }
@@ -522,6 +542,7 @@ fn tryFireWeaponWithForce(
             shot_count = 1;
         },
         .particle_stream => |mode| {
+            counts_accuracy_shots = false;
             if (mode.slow) {
                 _ = particles.spawnParticleSlow(
                     state,
@@ -547,22 +568,26 @@ fn tryFireWeaponWithForce(
             shot_count = 5;
             const spread_small = std.math.pi / 10.0;
             const spread_large = std.math.pi / 6.0;
-            _ = projectiles.spawn(muzzle, narrowF32(shot_angle - spread_small), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, false);
-            _ = projectiles.spawn(muzzle, narrowF32(shot_angle - spread_large), @intFromEnum(game_ids.ProjectileTypeId.plasma_minigun), projectile_owner, weapon_data.weapon_stats.get(.plasma_minigun).travel_budget, false);
-            _ = projectiles.spawn(muzzle, narrowF32(shot_angle), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, false);
-            _ = projectiles.spawn(muzzle, narrowF32(shot_angle + spread_large), @intFromEnum(game_ids.ProjectileTypeId.plasma_minigun), projectile_owner, weapon_data.weapon_stats.get(.plasma_minigun).travel_budget, false);
-            _ = projectiles.spawn(muzzle, narrowF32(shot_angle + spread_small), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, false);
+            _ = projectiles.spawn(muzzle, narrowF32(shot_angle - spread_small), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, projectile_hits_players);
+            _ = projectiles.spawn(muzzle, narrowF32(shot_angle - spread_large), @intFromEnum(game_ids.ProjectileTypeId.plasma_minigun), projectile_owner, weapon_data.weapon_stats.get(.plasma_minigun).travel_budget, projectile_hits_players);
+            _ = projectiles.spawn(muzzle, narrowF32(shot_angle), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, projectile_hits_players);
+            _ = projectiles.spawn(muzzle, narrowF32(shot_angle + spread_large), @intFromEnum(game_ids.ProjectileTypeId.plasma_minigun), projectile_owner, weapon_data.weapon_stats.get(.plasma_minigun).travel_budget, projectile_hits_players);
+            _ = projectiles.spawn(muzzle, narrowF32(shot_angle + spread_small), @intFromEnum(game_ids.ProjectileTypeId.plasma_rifle), projectile_owner, weapon_data.weapon_stats.get(.plasma_rifle).travel_budget, projectile_hits_players);
         },
         .swarmer_dump => {
-            const rocket_count = shot_count;
+            // Native spawns one rocket per integer counter step below the float
+            // ammo value (ceil), and zero rockets when firing with an
+            // empty/negative clip; the full clip value is subtracted either way.
+            const clip_ammo = player.weapon.ammo;
+            const rocket_count: i32 = if (clip_ammo > 0.0) @intFromFloat(@ceil(clip_ammo)) else 0;
             const step = if (state.preserve_bugs)
-                narrowF32(@as(f32, @floatFromInt(rocket_count)) * (native_pi / 3.0))
+                narrowF32(clip_ammo * (native_pi / 3.0))
             else if (rocket_count <= 1)
                 0.0
             else
                 narrowF32((native_pi * (2.0 / 3.0)) / @as(f32, @floatFromInt(rocket_count - 1)));
             var angle = if (state.preserve_bugs)
-                narrowF32((shot_angle - native_pi) - step * @as(f32, @floatFromInt(rocket_count)) * 0.5)
+                narrowF32((shot_angle - native_pi) - step * clip_ammo * 0.5)
             else
                 narrowF32(shot_angle - native_pi * (1.0 / 3.0));
             for (0..@as(usize, @intCast(rocket_count))) |_| {
@@ -577,7 +602,8 @@ fn tryFireWeaponWithForce(
                 );
                 angle = narrowF32(angle + step);
             }
-            ammo_cost = @floatFromInt(rocket_count);
+            ammo_cost = clip_ammo;
+            shot_count = rocket_count;
         },
     }
 
@@ -588,7 +614,9 @@ fn tryFireWeaponWithForce(
     const player_idx = player.index;
     if (player_idx >= 0 and player_idx < state.shots_fired.len) {
         const idx: usize = @intCast(player_idx);
-        state.shots_fired[idx] += shot_count;
+        if (counts_accuracy_shots) {
+            state.shots_fired[idx] += shot_count;
+        }
         const weapon_idx: usize = @intCast(@intFromEnum(player.weapon.weapon_id));
         if (weapon_idx < state.weapon_shots_fired[idx].len) {
             state.weapon_shots_fired[idx][weapon_idx] += shot_count;
@@ -979,14 +1007,13 @@ fn muzzleSpriteSpecs(weapon_id: WeaponId) []const MuzzleSpriteSpec {
     };
 }
 
-fn computeShotCount(
-    weapon_id: WeaponId,
-    ammo: f32,
-) i32 {
+fn computeShotCount(weapon_id: WeaponId) i32 {
     return switch (weapon_id) {
         .multi_plasma => 5,
         .plasma_shotgun => 14,
-        .mini_rocket_swarmers => @max(1, @as(i32, @intFromFloat(@floor(@max(0.0, ammo))))),
+        // The swarmer_dump branch derives the real rocket count from the live
+        // clip value (zero rockets on an empty/negative clip, like native).
+        .mini_rocket_swarmers => 1,
         .gauss_shotgun => 6,
         .ion_shotgun => 8,
         else => @max(1, weapon_data.weapon_stats.get(weapon_id).pellet_count),

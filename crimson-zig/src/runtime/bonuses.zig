@@ -255,6 +255,8 @@ pub const BonusPool = struct {
 
             if (entry.picked) continue;
 
+            // Native's player loop has no break: every player inside the
+            // pickup radius applies the bonus this tick.
             var picked_now = false;
             for (players) |*player| {
                 if (distanceSq(entry.pos, player.pos) >= pickup_sq) continue;
@@ -270,7 +272,6 @@ pub const BonusPool = struct {
                 entry.picked = true;
                 entry.time_left = narrowF32(bonus_pickup_linger);
                 picked_now = true;
-                break;
             }
 
             if (expired_to_unused and !picked_now) {
@@ -583,7 +584,12 @@ fn applyShockChainBonus(
     const target_idx = best_idx orelse return;
 
     const target = creatures.entries[target_idx];
-    const angle = state_mod.Vec2.sub(target.pos, origin).toHeading();
+    // Native stores (float)(atan2(dy, dx) - 1.5707964 - 3.1415927) with a
+    // single f32 spill (differs from toHeading() by 2*pi).
+    const delta = state_mod.Vec2.sub(target.pos, origin);
+    const angle: f32 = @floatCast(std.math.atan2(@as(f64, delta.y), @as(f64, delta.x)) -
+        @as(f64, native_math.roundF32(native_math.native_half_pi)) -
+        @as(f64, native_math.roundF32(native_math.native_pi)));
     const projectile_owner = owner_ref.OwnerRef.fromLocalPlayer(0);
     const type_id = @intFromEnum(game_ids.ProjectileTypeId.ion_rifle);
     const meta = projectileTravelBudgetFromRawId(type_id);
@@ -759,9 +765,9 @@ fn applyBonus(
             player.weapon.ammo = @floatFromInt(player.weapon.clip_size);
         },
         .weapon => {
-            if (perkActive(player.*, PerkId.alternate_weapon) and player.alt_weapon == null) {
-                player.alt_weapon = player.weapon;
-            }
+            // Native weapon pickup is just weapon_assign_player: the old
+            // weapon is never stashed (the alt slot is preloaded with a
+            // pistol at player reset).
             const weapon_id = weapon_data.weaponIdFromInt(effective_amount);
             player_runtime.weaponAssignPlayerWithState(player, weapon_id, state);
         },

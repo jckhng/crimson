@@ -157,9 +157,13 @@ def rush_mid_step(ctx: MidStepContext, spawn: RushSpawnState) -> None:
     ctx.world.creatures.spawn_inits(spawns)
 
 
-def quest_post_step(ctx: PostStepContext, spawn: QuestSpawnState) -> None:
+def quest_mid_step(ctx: MidStepContext, spawn: QuestSpawnState) -> None:
+    # Native runs quest_mode_update with the other mode updates before render,
+    # so quest spawns draw RNG ahead of the presentation pass, like the other
+    # modes' mid-steps. The scaled dt keeps the timeline (the quest score), the
+    # stall timer, and the completion transition slowed under Reflex Boost.
     state = ctx.world.state
-    dt_ms = float(ctx.step_result.timing.dt_ms_i32)
+    dt_ms = float(ctx.dt_sim_ms)
     creatures_none_active = not any(c.active for c in ctx.world.creatures.entries)
 
     entries, timeline_ms, creatures_none_active, no_creatures_timer_ms, spawns = tick_quest_mode_spawns(
@@ -187,23 +191,19 @@ def quest_post_step(ctx: PostStepContext, spawn: QuestSpawnState) -> None:
             state.rng,
         )
 
-    any_alive_after = any(player.health > 0.0 for player in ctx.world.players)
-    if any_alive_after:
-        completion_ms, completed, play_hit_sfx, play_completion_music = tick_quest_completion_transition(
-            spawn.completion_transition_ms,
-            frame_dt_ms=dt_ms,
-            creatures_none_active=creatures_none_active,
-            spawn_table_empty=spawn_table_empty_now,
-        )
-        spawn.completion_transition_ms = float(completion_ms)
-        spawn.completed = bool(completed)
-        spawn.play_hit_sfx = bool(play_hit_sfx)
-        spawn.play_completion_music = bool(play_completion_music)
-    else:
-        spawn.completion_transition_ms = -1.0
-        spawn.completed = False
-        spawn.play_hit_sfx = False
-        spawn.play_completion_music = False
+    # Native quest_mode_update has no player-alive gate on the completion
+    # transition: if the timer crosses 2500 ms while the death animation is
+    # still playing, the quest completes despite the player dying.
+    completion_ms, completed, play_hit_sfx, play_completion_music = tick_quest_completion_transition(
+        spawn.completion_transition_ms,
+        frame_dt_ms=dt_ms,
+        creatures_none_active=creatures_none_active,
+        spawn_table_empty=spawn_table_empty_now,
+    )
+    spawn.completion_transition_ms = float(completion_ms)
+    spawn.completed = bool(completed)
+    spawn.play_hit_sfx = bool(play_hit_sfx)
+    spawn.play_completion_music = bool(play_completion_music)
 
 
 def rush_input_transform(inputs: list[PlayerInput]) -> list[PlayerInput]:
@@ -262,8 +262,11 @@ class RushSessionRuntime(SessionModeRuntime):
 class QuestSessionRuntime(SessionModeRuntime):
     spawn: QuestSpawnState
 
-    def post_step(self, ctx: PostStepContext) -> None:
-        quest_post_step(ctx, self.spawn)
+    def needs_mid_step(self) -> bool:
+        return True
+
+    def mid_step(self, ctx: MidStepContext) -> None:
+        quest_mid_step(ctx, self.spawn)
 
 
 class TypoSessionRuntime(SessionModeRuntime):

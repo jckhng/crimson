@@ -23,7 +23,6 @@ from .state_types import BonusPickupEvent, GameplayState, PlayerState
 from .terrain_fx import TerrainFxBatch
 from .world_defs import BEAM_TYPES
 
-_MAX_HIT_SFX_PER_FRAME = 4
 _BULLET_HIT_SFX = (
     SfxId.BULLET_HIT_01,
     SfxId.BULLET_HIT_02,
@@ -107,9 +106,10 @@ def plan_hit_sfx(
 
     trigger_game_tune = False
     local_game_tune_started = bool(game_tune_started)
-    end = min(len(hits), _MAX_HIT_SFX_PER_FRAME)
+    # Native draws a hit-sound rand and plays the panned sample for every hit,
+    # uncapped; the per-hit world-step path already matches this.
     sfx: list[SfxId] = []
-    for idx in range(0, end):
+    for idx in range(len(hits)):
         if (not demo_mode_active) and game_mode != GameMode.RUSH and (not local_game_tune_started):
             # Mirrors `projectile_update`: first eligible hit calls
             # `sfx_play_exclusive(music_track_extra_0)` and skips the panned
@@ -211,27 +211,31 @@ def queue_projectile_decals_pre_hit(
             )
 
     # Native `projectile_update` spawns blood splatter before terrain decals.
+    # The whole splatter block (including its spread / reverse-gate rand draws)
+    # sits inside `if (config_violence_disabled == '\0')`; the bloody-mess decal
+    # loop below runs regardless of the violence setting.
     if bloody:
-        for _ in range(8):
-            spread = (
-                float(rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_BLOODY_MESS_SPREAD) & 0x1F) - 16.0
-            ) * 0.0625
+        if not violence_disabled:
+            for _ in range(8):
+                spread = (
+                    float(rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_BLOODY_MESS_SPREAD) & 0x1F) - 16.0
+                ) * 0.0625
+                state.effects.spawn_blood_splatter(
+                    pos=hit.hit,
+                    angle=base_angle + spread,
+                    age=0.0,
+                    rng=rng,
+                    detail_preset=detail_preset,
+                    violence_disabled=violence_disabled,
+                )
             state.effects.spawn_blood_splatter(
                 pos=hit.hit,
-                angle=base_angle + spread,
+                angle=base_angle + math.pi,
                 age=0.0,
                 rng=rng,
                 detail_preset=detail_preset,
                 violence_disabled=violence_disabled,
             )
-        state.effects.spawn_blood_splatter(
-            pos=hit.hit,
-            angle=base_angle + math.pi,
-            age=0.0,
-            rng=rng,
-            detail_preset=detail_preset,
-            violence_disabled=violence_disabled,
-        )
 
         lo = -30
         hi = 30
@@ -255,7 +259,7 @@ def queue_projectile_decals_pre_hit(
                 )
             lo -= 10
             hi += 10
-    elif not freeze_active:
+    elif not freeze_active and not violence_disabled:
         for _ in range(2):
             state.effects.spawn_blood_splatter(
                 pos=hit.hit,
@@ -306,7 +310,18 @@ def queue_projectile_decals_post_hit(
         runtime=post_ctx.large_hit_decal_runtime,
     )
 
-    if bool(hook_handled) or bool(post_ctx.freeze_active):
+    if bool(hook_handled):
+        return
+
+    if bool(post_ctx.freeze_active):
+        # Native: with Freeze active, default hits spawn one freeze shard here,
+        # after the burn draw, instead of the streak decal loop.
+        runtime = post_ctx.large_hit_decal_runtime
+        if runtime is not None:
+            shard_angle = base_angle + float(
+                rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_DEFAULT_FREEZE_SHARD_ANGLE) % 100,
+            ) * 0.01
+            runtime.spawn_freeze_shard(hit.hit, float(shard_angle))
         return
 
     for _ in range(3):

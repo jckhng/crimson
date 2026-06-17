@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import struct
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,7 +19,7 @@ from ..quests.level import QuestLevel
 from ..replay.checkpoints import ReplayCheckpoint
 from ..replay.codec import dump_replay_file
 from ..replay.header_settings import replay_header_from_session_settings
-from ..replay.types import Replay, ReplayTick
+from ..replay.types import Replay, ReplayCreatureSlotResidue, ReplayTick, ReplayVec2
 from .canonical_channels import (
     EntitySamplesSnapshot,
     RngStreamRow,
@@ -44,11 +46,32 @@ _FRAME_LEN_BYTES = 4
 _TICK_ENCODER = msgspec.msgpack.Encoder()
 _TICK_DECODER = msgspec.msgpack.Decoder(type=TickRecord)
 _GAME_MODE_QUESTS = 3
-_SUPPORTED_CAPTURE_FORMAT_VERSION = 12
+# v13 samples clip_size as raw f32 bits; v14 emits the decoded value;
+# v15 adds the creature pool residue snapshot on run_start rows.
+_SUPPORTED_CAPTURE_FORMAT_VERSIONS = frozenset({13, 14, 15})
+_POOL_RESIDUE_CAPTURE_VERSION = 15
 _TRACE_CHUNK_TICKS = 256
 _RUN_START_REASONS = frozenset(("run_start", "first_tick", "quest_attempt", "mode_or_stage_change"))
-_RUN_END_REASONS = frozenset(("run_end", "quest_attempt", "mode_or_stage_change", "shutdown"))
+_RUN_END_REASONS = frozenset(("run_end", "quest_attempt", "mode_or_stage_change", "shutdown", "capture_contract_error"))
 _SEED_SOURCES = frozenset(("unknown", "crt_srand"))
+# Replay seeds are derived from the rand state latched at run-setup entry
+# (before the first terrain draw), not from the stale session-wide srand seed.
+_RUN_SETUP_SEED_SOURCE = "run_setup_rng_state"
+_LCG_GAP_SEARCH_LIMIT = 1 << 16
+
+
+def _lcg_step_u32(state: int) -> int:
+    return (state * 214013 + 2531011) & 0xFFFFFFFF
+
+
+def _lcg_distance_u32(start: int, target: int, *, limit: int = _LCG_GAP_SEARCH_LIMIT) -> int | None:
+    state = int(start) & 0xFFFFFFFF
+    goal = int(target) & 0xFFFFFFFF
+    for steps in range(limit):
+        if state == goal:
+            return steps
+        state = _lcg_step_u32(state)
+    return None
 _MODE_LABEL_BY_ID = {
     int(GameMode.DEMO): "demo",
     int(GameMode.SURVIVAL): "survival",
@@ -164,6 +187,66 @@ class _SessionStartRow(
     session_fingerprint: _SessionFingerprintRow
 
 
+class _OutsideRngHeadRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    state_before_u32: int
+    state_after_u32: int
+    value_15: int | None = None
+    caller_static: str | None = None
+
+
+class _OutsideRngBag(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    calls: int = 0
+    dropped: int = 0
+    caller_counts: dict[str, int] = msgspec.field(default_factory=dict)
+    head: list[_OutsideRngHeadRow] = msgspec.field(default_factory=list)
+
+
+class _CaptureVec2Row(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    x: float | None = None
+    y: float | None = None
+
+
+class _CaptureTintRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    r: float | None = None
+    g: float | None = None
+    b: float | None = None
+    a: float | None = None
+
+
+class _CapturePoolResidueRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    index: int
+    active: int | None = None
+    phase_seed: float | None = None
+    state_flag: int | None = None
+    collision_flag: int | None = None
+    collision_timer: float | None = None
+    lifecycle_stage: float | None = None
+    pos: _CaptureVec2Row = msgspec.field(default_factory=_CaptureVec2Row)
+    vel: _CaptureVec2Row = msgspec.field(default_factory=_CaptureVec2Row)
+    hp: float | None = None
+    max_hp: float | None = None
+    heading: float | None = None
+    target_heading: float | None = None
+    size: float | None = None
+    hit_flash_timer: float | None = None
+    tint: _CaptureTintRow = msgspec.field(default_factory=_CaptureTintRow)
+    force_target: int | None = None
+    target: _CaptureVec2Row = msgspec.field(default_factory=_CaptureVec2Row)
+    contact_damage: float | None = None
+    move_speed: float | None = None
+    attack_cooldown: float | None = None
+    reward_value: float | None = None
+    type_id: int | None = None
+    target_player: int | None = None
+    link_index: int | None = None
+    target_offset: _CaptureVec2Row = msgspec.field(default_factory=_CaptureVec2Row)
+    orbit_angle: float | None = None
+    orbit_radius_u32: int | None = None
+    flags: int | None = None
+    ai_mode: int | None = None
+    anim_phase: float | None = None
+
+
 class _RunStartRow(
     msgspec.Struct,
     frozen=True,
@@ -180,6 +263,9 @@ class _RunStartRow(
     quest_stage_minor: int = -1
     seed_source: str = "unknown"
     tick_index_global: int | None = None
+    rng_state_at_run_setup: int | None = None
+    rng_setup_caller_static: str | None = None
+    pool_residue: list[_CapturePoolResidueRow] | None = None
 
 
 class _TickRow(
@@ -198,6 +284,10 @@ class _TickRow(
     tick_index_global: int | None = None
     quest_stage_major: int = -1
     quest_stage_minor: int = -1
+    rng_calls: int | None = None
+    rng_outside_before: _OutsideRngBag | None = None
+    rng_state_enter_u32: int | None = None
+    rng_state_leave_u32: int | None = None
     replay_inputs: list[tuple[float, float, float, float, int]] = msgspec.field(default_factory=list)
 
 
@@ -215,6 +305,7 @@ class _RunEndRow(
     ticks_written: int
     reason: str = "run_end"
     tick_index_global: int | None = None
+    rng_outside_tail: _OutsideRngBag | None = None
 
 
 class _ErrorRow(
@@ -229,6 +320,21 @@ class _ErrorRow(
     tick_index_global: int | None = None
 
 
+class _RunErrorRow(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    tag_field="event",
+    tag="run_error",
+):
+    error: str
+    run_id: int | None = None
+    mode_id: int | None = None
+    quest_stage_major: int | None = None
+    quest_stage_minor: int | None = None
+    tick_index_global: int | None = None
+
+
 class _SessionEndRow(
     msgspec.Struct,
     frozen=True,
@@ -240,7 +346,7 @@ class _SessionEndRow(
     ticks_written: int
 
 
-type _CaptureRow = _SessionStartRow | _RunStartRow | _TickRow | _RunEndRow | _ErrorRow | _SessionEndRow
+type _CaptureRow = _SessionStartRow | _RunStartRow | _TickRow | _RunEndRow | _ErrorRow | _RunErrorRow | _SessionEndRow
 
 
 _CAPTURE_ROW_DECODER = msgspec.json.Decoder(type=_CaptureRow)
@@ -280,6 +386,16 @@ class _OpenRun(msgspec.Struct):
     status: GameStatusData = msgspec.field(default_factory=GameStatusData)
     global_tick_first: int | None = None
     global_tick_last: int | None = None
+    rng_outside_calls: int = 0
+    rng_outside_dropped: int = 0
+    rng_outside_caller_counts: dict[str, int] = msgspec.field(default_factory=dict)
+    rng_unhooked_in_tick: int = 0
+    rng_unhooked_boundary: int = 0
+    rng_unhooked_unresolved: int = 0
+    rng_unhooked_gap_neighbors: dict[str, int] = msgspec.field(default_factory=dict)
+    rng_setup_draw_distance: int | None = None
+    rng_prev_leave_state: int | None = None
+    pool_residue: tuple[ReplayCreatureSlotResidue, ...] | None = None
 
 
 def _fingerprint(path: Path) -> BuiltinObject:
@@ -314,6 +430,139 @@ def _builtin_int(payload: BuiltinObject, key: str, default: int = 0) -> int:
     return default
 
 
+def _residue_float(value: float | None, *, field: str) -> float:
+    if value is None:
+        raise FridaFinalizeError(f"{field} must be a finite float in the pool residue snapshot")
+    return float(value)
+
+
+def _residue_int(value: int | None, *, field: str) -> int:
+    if value is None:
+        raise FridaFinalizeError(f"{field} must be present in the pool residue snapshot")
+    return int(value)
+
+
+def _residue_vec2(row: _CaptureVec2Row, *, field: str) -> ReplayVec2:
+    return ReplayVec2(
+        x=_residue_float(row.x, field=f"{field}.x"),
+        y=_residue_float(row.y, field=f"{field}.y"),
+    )
+
+
+def _pool_residue_from_run_start(run_start: _RunStartRow, *, field: str) -> tuple[ReplayCreatureSlotResidue, ...]:
+    rows = run_start.pool_residue
+    if rows is None:
+        raise FridaFinalizeError(f"{field}.pool_residue is required for capture v15 run_start rows")
+    out: list[ReplayCreatureSlotResidue] = []
+    for i, row in enumerate(rows):
+        slot_field = f"{field}.pool_residue[{i}]"
+        if int(row.index) != i:
+            raise FridaFinalizeError(f"{slot_field}.index={int(row.index)} does not match slot {i}")
+        if _residue_int(row.active, field=f"{slot_field}.active") != 0:
+            raise FridaFinalizeError(
+                f"{slot_field} is active at run start; creature_reset_all must have run before the latch",
+            )
+        out.append(
+            ReplayCreatureSlotResidue(
+                index=i,
+                phase_seed=_residue_float(row.phase_seed, field=f"{slot_field}.phase_seed"),
+                state_flag=_residue_int(row.state_flag, field=f"{slot_field}.state_flag"),
+                collision_flag=_residue_int(row.collision_flag, field=f"{slot_field}.collision_flag"),
+                collision_timer=_residue_float(row.collision_timer, field=f"{slot_field}.collision_timer"),
+                lifecycle_stage=_residue_float(row.lifecycle_stage, field=f"{slot_field}.lifecycle_stage"),
+                pos=_residue_vec2(row.pos, field=f"{slot_field}.pos"),
+                vel=_residue_vec2(row.vel, field=f"{slot_field}.vel"),
+                hp=_residue_float(row.hp, field=f"{slot_field}.hp"),
+                max_hp=_residue_float(row.max_hp, field=f"{slot_field}.max_hp"),
+                heading=_residue_float(row.heading, field=f"{slot_field}.heading"),
+                target_heading=_residue_float(row.target_heading, field=f"{slot_field}.target_heading"),
+                size=_residue_float(row.size, field=f"{slot_field}.size"),
+                hit_flash_timer=_residue_float(row.hit_flash_timer, field=f"{slot_field}.hit_flash_timer"),
+                tint_r=_residue_float(row.tint.r, field=f"{slot_field}.tint.r"),
+                tint_g=_residue_float(row.tint.g, field=f"{slot_field}.tint.g"),
+                tint_b=_residue_float(row.tint.b, field=f"{slot_field}.tint.b"),
+                tint_a=_residue_float(row.tint.a, field=f"{slot_field}.tint.a"),
+                force_target=_residue_int(row.force_target, field=f"{slot_field}.force_target"),
+                target=_residue_vec2(row.target, field=f"{slot_field}.target"),
+                contact_damage=_residue_float(row.contact_damage, field=f"{slot_field}.contact_damage"),
+                move_speed=_residue_float(row.move_speed, field=f"{slot_field}.move_speed"),
+                attack_cooldown=_residue_float(row.attack_cooldown, field=f"{slot_field}.attack_cooldown"),
+                reward_value=_residue_float(row.reward_value, field=f"{slot_field}.reward_value"),
+                type_id=_residue_int(row.type_id, field=f"{slot_field}.type_id"),
+                target_player=_residue_int(row.target_player, field=f"{slot_field}.target_player"),
+                link_index=_residue_int(row.link_index, field=f"{slot_field}.link_index"),
+                target_offset=_residue_vec2(row.target_offset, field=f"{slot_field}.target_offset"),
+                orbit_angle=_residue_float(row.orbit_angle, field=f"{slot_field}.orbit_angle"),
+                orbit_radius_u32=_residue_int(row.orbit_radius_u32, field=f"{slot_field}.orbit_radius_u32"),
+                flags=_residue_int(row.flags, field=f"{slot_field}.flags"),
+                ai_mode=_residue_int(row.ai_mode, field=f"{slot_field}.ai_mode"),
+                anim_phase=_residue_float(row.anim_phase, field=f"{slot_field}.anim_phase"),
+            ),
+        )
+    return tuple(out)
+
+
+def _validate_capture_completeness(session_row: _SessionStartRow, *, field: str) -> None:
+    """Reject captures recorded with trimming: parity traces must carry the
+    full per-tick channels, never a sample of creatures/draws/events."""
+
+    config = session_row.config
+    untrimmed_required = {
+        "creature_sample_limit": config.creature_sample_limit,
+        "projectile_sample_limit": config.projectile_sample_limit,
+        "secondary_projectile_sample_limit": config.secondary_projectile_sample_limit,
+        "bonus_sample_limit": config.bonus_sample_limit,
+        "max_rng_head_per_tick": config.max_rng_head_per_tick,
+        "max_rng_caller_kinds": config.max_rng_caller_kinds,
+        "max_events_per_tick": config.max_events_per_tick,
+        "max_head_per_kind": config.max_head_per_kind,
+    }
+    # v13 sessions predate unlimited defaults for the diagnostic streams; from
+    # v14 on they must be complete too (outside-tick rng head fed the per-frame
+    # burn forensics, creature delta ids feed lifecycle digests).
+    if int(session_row.capture_format_version) >= 14:
+        untrimmed_required["max_rng_outside_tick_head"] = config.max_rng_outside_tick_head
+        untrimmed_required["max_creature_delta_ids"] = config.max_creature_delta_ids
+    trimmed = {name: int(value) for name, value in untrimmed_required.items() if int(value) >= 0}
+    if trimmed:
+        raise FridaFinalizeError(
+            f"{field} capture was recorded with trimmed streams {trimmed}; "
+            "parity captures require unlimited limits (-1)",
+        )
+    if int(config.focus_tick) >= 0:
+        raise FridaFinalizeError(
+            f"{field} capture used focus mode (focus_tick={int(config.focus_tick)}); "
+            "parity captures must record every tick",
+        )
+
+
+def _decode_clip_size_raw_bits(value: int, *, field: str) -> int:
+    """Decode a v13 `clip_size` sample into the integral clip size.
+
+    The native player struct stores clip_size as f32 and the v13 capture
+    script samples it with a 32-bit integer read, so the wire value is the
+    raw bit pattern (e.g. 1092616192 == 10.0f)."""
+
+    bits = int(value) & 0xFFFFFFFF
+    decoded = struct.unpack("<f", struct.pack("<I", bits))[0]
+    if not math.isfinite(decoded) or not (0.0 <= decoded <= 10000.0):
+        raise FridaFinalizeError(f"{field} is not a plausible f32 clip_size bit pattern: {int(value)}")
+    rounded = round(decoded)
+    if abs(decoded - rounded) > 1e-3:
+        raise FridaFinalizeError(f"{field} decodes to a non-integral clip_size: {decoded!r}")
+    return int(rounded)
+
+
+def _normalized_capture_player(player: SnapshotPlayer, *, clip_size_raw_bits: bool, field: str) -> SnapshotPlayer:
+    if not clip_size_raw_bits:
+        return player
+    weapon = msgspec.structs.replace(
+        player.weapon,
+        clip_size=_decode_clip_size_raw_bits(player.weapon.clip_size, field=f"{field}.weapon.clip_size"),
+    )
+    return msgspec.structs.replace(player, weapon=weapon)
+
+
 def _decode_capture_row(line: bytes, *, field: str) -> _CaptureRow:
     try:
         return _CAPTURE_ROW_DECODER.decode(line)
@@ -325,6 +574,7 @@ def _canonical_channels_payload(
     *,
     channels: _TickChannels,
     local_tick: int,
+    clip_size_raw_bits: bool,
     field: str,
 ) -> tuple[ReplayCheckpoint, ReplayTickChannels]:
     checkpoint = msgspec.structs.replace(channels.checkpoint, tick_index=int(local_tick))
@@ -345,26 +595,59 @@ def _canonical_channels_payload(
         )
         for idx, row in enumerate(channels.rng_stream)
     ]
+    # Capture timing rows carry session-global tick/frame counters and a null
+    # mode_fn (the gpur_enter sample is built before any mode hook fires);
+    # rebase them to the run-local domain the rewrite recorder emits so the
+    # timing channel is comparable. `frame_dt_ms_f32` is recomputed from the
+    # i32 sample: the native global is an i32 and the v13 capture script reads
+    # it with a float read, leaving a denormal bit pattern on the wire.
+    timing_samples = [
+        msgspec.structs.replace(
+            row,
+            tick_index=int(local_tick),
+            gameplay_frame=(None if row.gameplay_frame is None else int(local_tick)),
+            mode_fn=(
+                "gameplay_update_and_render"
+                if row.mode_fn is None and row.phase == "gpur_enter"
+                else row.mode_fn
+            ),
+            frame_dt_ms_f32=(
+                row.frame_dt_ms_f32 if row.frame_dt_ms_i32 is None else float(int(row.frame_dt_ms_i32))
+            ),
+        )
+        for row in channels.timing_samples
+    ]
     normalized = _TickChannels(
         checkpoint=checkpoint,
         sim_state=channels.sim_state,
         entity_samples=channels.entity_samples,
         rng_stream=list(channels.rng_stream),
-        timing_samples=list(channels.timing_samples),
+        timing_samples=timing_samples,
     )
     gameplay = normalized.sim_state.gameplay
+    # Outside quest mode the native quest_stage globals are sticky menu
+    # residue (whatever quest the menu last selected), not run state; the
+    # canonical channel zeroes them like the rewrite does.
+    in_quest = int(gameplay.mode_id) == _GAME_MODE_QUESTS
     return checkpoint, ReplayTickChannels(
         checkpoint=normalized.checkpoint,
         sim_state=SimStateSnapshot(
             gameplay=SnapshotGameplay(
                 mode_id=int(gameplay.mode_id),
-                quest_stage_major=int(gameplay.quest_stage_major),
-                quest_stage_minor=int(gameplay.quest_stage_minor),
+                quest_stage_major=(int(gameplay.quest_stage_major) if in_quest else 0),
+                quest_stage_minor=(int(gameplay.quest_stage_minor) if in_quest else 0),
                 perk_pending_count=int(gameplay.perk_pending_count),
                 perk_choices_dirty=bool(gameplay.perk_choices_dirty),
                 bonus_timers=gameplay.bonus_timers,
             ),
-            players=list(normalized.sim_state.players),
+            players=[
+                _normalized_capture_player(
+                    player,
+                    clip_size_raw_bits=clip_size_raw_bits,
+                    field=f"{field}.sim_state.players[{idx}]",
+                )
+                for idx, player in enumerate(normalized.sim_state.players)
+            ],
         ),
         entity_samples=normalized.entity_samples,
         rng_stream=rng_stream,
@@ -581,6 +864,105 @@ def _build_meta(
     )
 
 
+def _merge_outside_rng_bag(run: _OpenRun, bag: _OutsideRngBag) -> None:
+    run.rng_outside_calls += int(bag.calls)
+    run.rng_outside_dropped += int(bag.dropped)
+    for key, count in bag.caller_counts.items():
+        run.rng_outside_caller_counts[str(key)] = run.rng_outside_caller_counts.get(str(key), 0) + int(count)
+
+
+def _account_tick_rng_evidence(
+    run: _OpenRun,
+    *,
+    tick_row: _TickRow,
+    rng_stream: list[RngStreamRow],
+    field: str,
+) -> None:
+    """Track rand draws the crt_rand hook never observed.
+
+    Real memory states (gpur enter/leave plus per-call state_before) expose
+    unhooked draws as LCG chain gaps; the per-caller counts say which hooked
+    callers bracket each gap so the report points at what the port misses.
+    """
+    bag = tick_row.rng_outside_before
+    if (
+        tick_row.rng_calls is None
+        or bag is None
+        or tick_row.rng_state_enter_u32 is None
+        or tick_row.rng_state_leave_u32 is None
+    ):
+        raise FridaFinalizeError(
+            f"{field} must carry rng accounting "
+            "(rng_calls, rng_outside_before, rng_state_enter_u32, rng_state_leave_u32)",
+        )
+    if int(tick_row.rng_calls) != len(rng_stream):
+        raise FridaFinalizeError(
+            f"{field}.rng_calls={int(tick_row.rng_calls)} does not match rng_stream length {len(rng_stream)}",
+        )
+    enter = int(tick_row.rng_state_enter_u32)
+    leave = int(tick_row.rng_state_leave_u32)
+    _merge_outside_rng_bag(run, bag)
+
+    if run.rng_prev_leave_state is None:
+        # First tick of the run: the distance from the replay seed (run-setup
+        # rand state) to gpur enter is the run's setup draw count.
+        run.rng_setup_draw_distance = _lcg_distance_u32(int(run.replay_seed), enter)
+    else:
+        # Between gpur windows: hooked outside draws are counted in the bag;
+        # any excess chain distance is unhooked draws.
+        total = _lcg_distance_u32(run.rng_prev_leave_state, enter)
+        if total is None:
+            run.rng_unhooked_unresolved += 1
+        else:
+            unhooked = total - int(bag.calls)
+            if unhooked < 0:
+                run.rng_unhooked_unresolved += 1
+            else:
+                run.rng_unhooked_boundary += unhooked
+
+    prev = enter
+    for row in rng_stream:
+        gap = _lcg_distance_u32(prev, int(row.state_before_u32))
+        if gap is None:
+            run.rng_unhooked_unresolved += 1
+        elif gap > 0:
+            run.rng_unhooked_in_tick += gap
+            neighbor = "unknown" if row.caller is None else f"0x{int(row.caller):08x}"
+            run.rng_unhooked_gap_neighbors[neighbor] = run.rng_unhooked_gap_neighbors.get(neighbor, 0) + gap
+        prev = int(row.state_after_u32)
+    tail_gap = _lcg_distance_u32(prev, leave)
+    if tail_gap is None:
+        run.rng_unhooked_unresolved += 1
+    elif tail_gap > 0:
+        run.rng_unhooked_in_tick += tail_gap
+        run.rng_unhooked_gap_neighbors["tick_tail"] = (
+            run.rng_unhooked_gap_neighbors.get("tick_tail", 0) + tail_gap
+        )
+    run.rng_prev_leave_state = leave
+
+
+def _write_rng_evidence_report(out_path: Path, run: _OpenRun) -> None:
+    report = {
+        "run_id": int(run.run_id),
+        "mode_id": int(run.mode_id),
+        "replay_seed": int(run.replay_seed),
+        "setup_draw_distance": run.rng_setup_draw_distance,
+        "outside_calls": int(run.rng_outside_calls),
+        "outside_dropped": int(run.rng_outside_dropped),
+        "outside_caller_counts": dict(
+            sorted(run.rng_outside_caller_counts.items(), key=lambda kv: -kv[1]),
+        ),
+        "unhooked_in_tick": int(run.rng_unhooked_in_tick),
+        "unhooked_boundary": int(run.rng_unhooked_boundary),
+        "unhooked_unresolved": int(run.rng_unhooked_unresolved),
+        "unhooked_gap_neighbors": dict(
+            sorted(run.rng_unhooked_gap_neighbors.items(), key=lambda kv: -kv[1]),
+        ),
+    }
+    evidence_path = Path(out_path).with_suffix(".rng_evidence.json")
+    evidence_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+
 def _write_run_trace(
     *,
     raw_path: Path,
@@ -644,6 +1026,11 @@ def _write_run_trace(
         seed=int(run.replay_seed),
         status=run.status,
     )
+    if run.pool_residue is not None:
+        replay_header = msgspec.structs.replace(
+            replay_header,
+            initial_creature_pool=run.pool_residue,
+        )
     replay_ticks = [
         ReplayTick(
             inputs=run.replay_inputs[i],
@@ -655,6 +1042,7 @@ def _write_run_trace(
         replay_path,
         Replay(header=replay_header, ticks=replay_ticks),
     )
+    _write_rng_evidence_report(out_path, run)
     return FinalizedTrace(
         run_id=int(run.run_id),
         out_path=Path(out_path),
@@ -701,10 +1089,11 @@ def finalize_frida_jsonl_to_traces(
                     case _SessionStartRow() as session_row:
                         if session_start is not None:
                             raise FridaFinalizeError(f"{raw_path}.lines[{line_no}] duplicate session_start")
-                        if int(session_row.capture_format_version) != int(_SUPPORTED_CAPTURE_FORMAT_VERSION):
+                        if int(session_row.capture_format_version) not in _SUPPORTED_CAPTURE_FORMAT_VERSIONS:
                             raise FridaFinalizeError(
                                 f"{raw_path}.lines[{line_no}] unsupported capture_format_version="
-                                f"{int(session_row.capture_format_version)}; expected {int(_SUPPORTED_CAPTURE_FORMAT_VERSION)}",
+                                f"{int(session_row.capture_format_version)}; "
+                                f"expected one of {sorted(_SUPPORTED_CAPTURE_FORMAT_VERSIONS)}",
                             )
                         if not str(session_row.session_id):
                             raise FridaFinalizeError(f"{raw_path}.lines[{line_no}].session_id must be non-empty")
@@ -724,6 +1113,7 @@ def finalize_frida_jsonl_to_traces(
                             raise FridaFinalizeError(
                                 f"{raw_path}.lines[{line_no}].session_fingerprint.session_id must match session_id",
                             )
+                        _validate_capture_completeness(session_row, field=f"{raw_path}.lines[{line_no}]")
                         session_start = session_row
                         continue
                     case _:
@@ -747,17 +1137,35 @@ def finalize_frida_jsonl_to_traces(
                             raise FridaFinalizeError(f"{raw_path}.lines[{line_no}].seed must be >= 0")
                         if int(run_start.player_count) <= 0:
                             raise FridaFinalizeError(f"{raw_path}.lines[{line_no}].player_count must be positive")
+                        # The session srand seed is stale by run start (menus and
+                        # earlier runs already consumed draws); the rand state
+                        # latched at run-setup entry is the replayable seed.
+                        if run_start.rng_state_at_run_setup is None:
+                            raise FridaFinalizeError(
+                                f"{raw_path}.lines[{line_no}].rng_state_at_run_setup is required for replay seeding",
+                            )
+                        if not (0 <= int(run_start.rng_state_at_run_setup) <= 0xFFFFFFFF):
+                            raise FridaFinalizeError(
+                                f"{raw_path}.lines[{line_no}].rng_state_at_run_setup must be u32",
+                            )
+                        pool_residue: tuple[ReplayCreatureSlotResidue, ...] | None = None
+                        if int(session_start.capture_format_version) >= _POOL_RESIDUE_CAPTURE_VERSION:
+                            pool_residue = _pool_residue_from_run_start(
+                                run_start,
+                                field=f"{raw_path}.lines[{line_no}]",
+                            )
                         spool_path = temp_root / f"run_{int(run_start.run_id)}.ticks"
                         active_run = _OpenRun(
                             run_id=int(run_start.run_id),
                             mode_id=mode_id,
                             quest_stage_major=int(run_start.quest_stage_major),
                             quest_stage_minor=int(run_start.quest_stage_minor),
-                            replay_seed=int(run_start.seed),
+                            replay_seed=int(run_start.rng_state_at_run_setup),
                             replay_player_count=int(run_start.player_count),
                             temp_path=spool_path,
                             stream=spool_path.open("wb"),
-                            replay_seed_source=str(run_start.seed_source),
+                            replay_seed_source=_RUN_SETUP_SEED_SOURCE,
+                            pool_residue=pool_residue,
                         )
                         continue
                     case _TickRow() as tick_row:
@@ -812,7 +1220,14 @@ def finalize_frida_jsonl_to_traces(
                         _checkpoint, channels = _canonical_channels_payload(
                             channels=tick_row.channels,
                             local_tick=int(active_run.next_local_tick),
+                            clip_size_raw_bits=(int(session_start.capture_format_version) == 13),
                             field=f"{raw_path}.lines[{line_no}].channels",
+                        )
+                        _account_tick_rng_evidence(
+                            active_run,
+                            tick_row=tick_row,
+                            rng_stream=channels.rng_stream,
+                            field=f"{raw_path}.lines[{line_no}]",
                         )
                         if int(active_run.tick_count) == 0 and tick_row.channels.sim_state.gameplay.status is not None:
                             active_run.status = tick_row.channels.sim_state.gameplay.status
@@ -869,6 +1284,11 @@ def finalize_frida_jsonl_to_traces(
                                 f"{raw_path}.lines[{line_no}] run_end.ticks_written={int(run_end.ticks_written)} "
                                 f"does not match active run tick_count {int(active_run.tick_count)}",
                             )
+                        if run_end.rng_outside_tail is None:
+                            raise FridaFinalizeError(
+                                f"{raw_path}.lines[{line_no}].rng_outside_tail is required",
+                            )
+                        _merge_outside_rng_bag(active_run, run_end.rng_outside_tail)
                         traces.append(
                             _write_run_trace(
                                 raw_path=raw_path,
@@ -889,6 +1309,8 @@ def finalize_frida_jsonl_to_traces(
                             f"{location} capture error={error_row.error!r} "
                             f"tick_index_global={int(error_row.tick_index_global)}",
                         )
+                    case _RunErrorRow():
+                        continue
                     case _SessionEndRow():
                         if active_run is not None:
                             raise FridaFinalizeError(f"{raw_path}.lines[{line_no}] session_end while run is active")

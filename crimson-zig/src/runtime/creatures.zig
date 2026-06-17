@@ -1,4 +1,5 @@
 const std = @import("std");
+const replay_codec = @import("../replay_codec.zig");
 const game_ids = @import("../game_ids.zig");
 const native_math = @import("native_math.zig");
 
@@ -83,6 +84,47 @@ pub const CreatureState = struct {
     last_hit_owner: owner_ref.OwnerRef = owner_local_player,
     flags: u32 = 0,
 };
+
+pub fn applyPoolResidue(
+    pool: *CreaturePool,
+    residue: []const replay_codec.ReplayCreatureSlotResidue,
+) void {
+    // Native creature_reset_all clears only `active`; replays of native
+    // captures seed the previous occupants' persistent fields so stale reads
+    // (link_index, target_heading, AI7 timers, ...) match the original run.
+    for (residue) |slot| {
+        if (slot.index < 0 or slot.index >= pool.entries.len) continue;
+        const entry = &pool.entries[@intCast(slot.index)];
+        entry.* = .{
+            .active = false,
+            .type_id = slot.type_id,
+            .pos = .{ .x = slot.pos.x, .y = slot.pos.y },
+            .target = .{ .x = slot.target.x, .y = slot.target.y },
+            .target_offset = .{ .x = slot.target_offset.x, .y = slot.target_offset.y },
+            .heading = slot.heading,
+            .target_heading = slot.target_heading,
+            .phase_seed = slot.phase_seed,
+            .anim_phase = slot.anim_phase,
+            .vel = .{ .x = slot.vel.x, .y = slot.vel.y },
+            .force_target = slot.force_target,
+            .ai_mode = std.enums.fromInt(spawn_mod.CreatureAiMode, slot.ai_mode) orelse .orbit_player,
+            .link_index = slot.link_index,
+            .orbit_angle = slot.orbit_angle,
+            .orbit_radius = @bitCast(slot.orbit_radius_u32),
+            .hp = slot.hp,
+            .max_hp = slot.max_hp,
+            .move_speed = slot.move_speed,
+            .reward_value = slot.reward_value,
+            .size = slot.size,
+            .contact_damage = slot.contact_damage,
+            .plague_infected = slot.collision_flag != 0,
+            .collision_timer = slot.collision_timer,
+            .lifecycle_stage = slot.lifecycle_stage,
+            .attack_cooldown = slot.attack_cooldown,
+            .flags = @bitCast(slot.flags),
+        };
+    }
+}
 
 pub const ShotResolutionResult = struct {
     hits: i32 = 0,
@@ -2102,11 +2144,13 @@ pub const CreaturePool = struct {
                 creature.attack_cooldown = narrowF32(creature.attack_cooldown - dt_f32);
             }
 
-            if (perkActive(player, PerkId.radioactive)) {
+            // Native gates on the global perk count and only fires the pulse
+            // while the creature is still alive (hp > 0).
+            if (anyPlayerHasPerk(players, PerkId.radioactive)) {
                 const dist = state_mod.Vec2.sub(creature.pos, player.pos).length();
                 if (dist < 100.0) {
                     creature.collision_timer -= dt_f32 * 1.5;
-                    if (creature.collision_timer < 0.0) {
+                    if (creature.collision_timer < 0.0 and creature.hp > 0.0) {
                         creature.collision_timer = plague_collision_period;
                         const pulse_damage = (100.0 - dist) * 0.3;
                         creature.hp = narrowF32(creature.hp - pulse_damage);
@@ -2182,6 +2226,9 @@ pub const CreaturePool = struct {
                 };
 
                 if (state.bonuses.energizer > 0.0 and creature.max_hp < 380.0) {
+                    // Native double-pays the eat kill: a direct exp += reward
+                    // store here, plus creature_handle_death's own award below.
+                    _ = awardExperienceOnceFromReward(&players[0], creature.reward_value);
                     effect_pool.spawnBurst(
                         state,
                         creature.pos,
@@ -2307,7 +2354,8 @@ pub const CreaturePool = struct {
                 const jitter = @as(f32, @floatFromInt(jitter_i32)) * 0.002;
                 const size = @max(@as(f32, 1e-6), creature.size);
                 var turn = jitter / (size * 0.025);
-                const half_pi: f32 = std.math.pi / 2.0;
+                // Native clamps against the f32 literal 1.5707964.
+                const half_pi: f32 = native_math.roundF32(native_math.native_half_pi);
                 if (turn > half_pi) turn = half_pi;
                 creature.heading = narrowF32(creature.heading + turn);
             }
@@ -3154,25 +3202,26 @@ fn movementDeltaFromHeadingF32(
     move_scale: f32,
     move_speed: f32,
 ) state_mod.Vec2 {
-    // Native computes trig/multiply chain in x87 precision and narrows only
-    // when writing the final velocity components.
+    // The game leaves the x87 in single-precision mode (the Direct3D 8 device
+    // init does not pass D3DCREATE_FPU_PRESERVE): every multiply in the
+    // velocity chain rounds to f32, while fsin/fcos evaluate in extended
+    // precision internally so their rounding lands in the first multiply
+    // (creature_update_all 0x426dab).
     const radians = @as(f64, @floatCast(narrowF32(heading))) - @as(f64, @floatCast(native_half_pi));
 
-    var vx = std.math.cos(radians);
-    vx *= @as(f64, @floatCast(dt));
-    vx *= @as(f64, @floatCast(move_scale));
-    vx *= @as(f64, @floatCast(move_speed));
-    vx *= @as(f64, @floatCast(creature_speed_scale));
+    var vx = narrowF32(std.math.cos(radians) * @as(f64, @floatCast(dt)));
+    vx = narrowF32(vx * move_scale);
+    vx = narrowF32(vx * move_speed);
+    vx = narrowF32(vx * creature_speed_scale);
 
-    var vy = std.math.sin(radians);
-    vy *= @as(f64, @floatCast(dt));
-    vy *= @as(f64, @floatCast(move_scale));
-    vy *= @as(f64, @floatCast(move_speed));
-    vy *= @as(f64, @floatCast(creature_speed_scale));
+    var vy = narrowF32(std.math.sin(radians) * @as(f64, @floatCast(dt)));
+    vy = narrowF32(vy * move_scale);
+    vy = narrowF32(vy * move_speed);
+    vy = narrowF32(vy * creature_speed_scale);
 
     return .{
-        .x = narrowF32(vx),
-        .y = narrowF32(vy),
+        .x = vx,
+        .y = vy,
     };
 }
 
@@ -3457,6 +3506,10 @@ fn spawnSplitChildrenOnDeath(
     const heading_offsets = [_]f32{ -native_half_pi, native_half_pi };
     for (heading_offsets) |heading_offset| {
         const child_idx = allocCreatureSlot(self, &state.rng);
+        // Native creature_alloc_slot draws a phase seed (rand & 0x17f) that the
+        // struct copy from the parent immediately overwrites; only the draw
+        // itself matters for the stream.
+        _ = state.rng.randTagged(rng_callers.creature_alloc_slot_phase_seed);
         var child = source;
         child.active = true;
         child.phase_seed = @floatFromInt(state.rng.randTagged(if (heading_offset < 0.0) rng_callers.creature_handle_death_split_child_1_phase_seed else rng_callers.creature_handle_death_split_child_2_phase_seed) & 0xff);
@@ -3540,7 +3593,7 @@ fn emitDeathSideEffects(
         world_size,
     );
     if (spawned_bonus) |_| {
-        effects.spawnBurst(
+        effects.spawnBurstWithCallers(
             state,
             death_pos,
             16,
@@ -3548,6 +3601,7 @@ fn emitDeathSideEffects(
             0.4,
             null,
             .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+            effects_mod.EffectPool.bonus_on_kill_burst_callers,
         );
     }
     if (state.bonuses.freeze > 0.0) {

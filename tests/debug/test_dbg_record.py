@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import msgspec
 import pytest
 
 import crimson.dbg.record as dbg_record
@@ -32,9 +31,11 @@ def test_record_replay_to_trace_dispatches_python_impl(monkeypatch, tmp_path: Pa
         *,
         replay_path: Path,
         out_path: Path,
+        pre_tick_rand_draws: int = 0,
     ) -> object:
         captured["replay_path"] = replay_path
         captured["out_path"] = out_path
+        captured["pre_tick_rand_draws"] = pre_tick_rand_draws
         return sentinel
 
     monkeypatch.setattr(dbg_record, "_record_replay_to_trace_python", _fake_python)
@@ -50,12 +51,14 @@ def test_record_replay_to_trace_dispatches_python_impl(monkeypatch, tmp_path: Pa
         out_path=out_path,
         impl="python",
         warnings_out=warnings,
+        pre_tick_rand_draws=1,
     )
 
     assert result is sentinel
     assert warnings == []
     assert captured["replay_path"] == replay_path
     assert captured["out_path"] == out_path
+    assert captured["pre_tick_rand_draws"] == 1
 
 
 def test_record_replay_to_trace_dispatches_zig_impl_and_collects_warnings(monkeypatch, tmp_path: Path) -> None:
@@ -279,47 +282,7 @@ def test_zig_dbg_record_cli_writes_cdt_trace(tmp_path: Path) -> None:
 
 
 def _write_zig_compatible_msgpack_replay(path: Path, *, player_count: int) -> None:
-    path.write_bytes(
-        msgspec.msgpack.encode(
-            {
-                "header": {
-                    "game_mode_id": int(GameMode.SURVIVAL),
-                    "seed": 0xBEEF,
-                    "replay_format_version": 8,
-                    "quest_level": "",
-                    "bootstrap_kind": "none",
-                    "bootstrap_seed": 0,
-                    "game_version": "0.9.0",
-                    "tick_rate": 60,
-                    "difficulty_level": 0,
-                    "hardcore": False,
-                    "preserve_bugs": False,
-                    "detail_preset": 5,
-                    "gore_disabled": 0,
-                    "world_size": 1024.0,
-                    "player_count": int(player_count),
-                    "status": {
-                        "quest_unlock_index": 0,
-                        "quest_unlock_index_full": 0,
-                        "weapon_usage_counts": [0] * 53,
-                    },
-                    "claimed_stats": {
-                        "complete": False,
-                        "ticks": 1,
-                        "elapsed_ms": 16,
-                        "score_xp": 0,
-                        "kills": 0,
-                        "most_used_weapon_id": 1,
-                        "shots_fired": 0,
-                        "shots_hit": 0,
-                    },
-                    "input_quantization": "f32",
-                },
-                "inputs": [
-                    [[0.0, 0.0, 512.0, 512.0, 0] for _ in range(int(player_count))],
-                ],
-                "dt": [1.0 / 60.0],
-                "events": [],
-            },
-        ),
-    )
+    from crimson.replay.codec import dump_replay_file
+    from tests.replay.cli._helpers import build_replay
+
+    dump_replay_file(path, build_replay(mode=GameMode.SURVIVAL, ticks=1, player_count=player_count))

@@ -10,7 +10,7 @@ from grim.color import RGBA
 from grim.geom import Vec2
 from grim.rand import CrandLike
 
-from ..math_parity import NATIVE_TAU, f32, heading_from_delta_f32
+from ..math_parity import NATIVE_HALF_PI, NATIVE_TAU, f32, heading_from_delta_f32
 from ..perks import PerkId
 from ..perks.helpers import perk_active
 from ..player_damage import PlayerDeathRuntime
@@ -118,9 +118,11 @@ def _spawn_native_fire_muzzle_sprites(
         return
 
     for speed, scale, alpha in specs:
+        # Native uses raw (cos h, sin h) of the aim heading - the aim direction
+        # rotated 90 degrees - matching the Fire Cough and shell-casing ports.
         state.sprite_effects.spawn(
             pos=muzzle,
-            vel=Vec2.from_heading(aim_heading) * float(speed),
+            vel=Vec2.from_angle(aim_heading) * float(speed),
             scale=float(scale),
             color=RGBA(0.5, 0.5, 0.5, float(alpha)),
         )
@@ -135,34 +137,32 @@ def _native_shot_angle_with_jitter(
 ) -> float:
     # Native gameplay fire owns two exact `player_update` draw sites for the
     # disc-spread direction and magnitude before the later projectile work.
+    # Float sequence per the decompile: half the f32 aim distance is spilled,
+    # the spread/magnitude product chain stays in extended precision, the
+    # jittered aim x is spilled while y feeds atan2 unspilled, and the heading
+    # is `(float)(atan2(pos - jitter) - 1.5707964)`.
     aim_dx = float(f32(float(aim.x) - float(player_pos.x)))
     aim_dy = float(f32(float(aim.y) - float(player_pos.y)))
     dist_sq = float(f32(float(f32(float(aim_dx) * float(aim_dx))) + float(f32(float(aim_dy) * float(aim_dy)))))
-    dist = float(f32(math.sqrt(float(dist_sq))))
-    max_offset = float(f32(float(f32(float(dist) * float(spread_heat))) * 0.5))
+    half_len = float(f32(float(f32(math.sqrt(float(dist_sq)))) * 0.5))
 
-    dir_angle = float(
+    dir_draw = float(rng.rand_tagged(RngCallerStatic.PLAYER_UPDATE_SHOT_JITTER_DIR) & 0x1FF)
+    mag_draw = float(rng.rand_tagged(RngCallerStatic.PLAYER_UPDATE_SHOT_JITTER_MAG) & 0x1FF)
+    offset_term = half_len * float(spread_heat) * mag_draw * 0.001953125
+    dir_angle = float(f32(dir_draw * float(f32(float(NATIVE_TAU) / 512.0))))
+
+    aim_jitter_x = float(f32(math.cos(dir_angle) * offset_term + float(aim.x)))
+    aim_jitter_y = math.sin(dir_angle) * offset_term + float(aim.y)
+
+    return float(
         f32(
-            float(rng.rand_tagged(RngCallerStatic.PLAYER_UPDATE_SHOT_JITTER_DIR) & 0x1FF)
-            * (float(NATIVE_TAU) / 512.0),
+            math.atan2(
+                float(player_pos.y) - aim_jitter_y,
+                float(player_pos.x) - aim_jitter_x,
+            )
+            - float(NATIVE_HALF_PI),
         ),
     )
-    mag = float(
-        f32(
-            float(rng.rand_tagged(RngCallerStatic.PLAYER_UPDATE_SHOT_JITTER_MAG) & 0x1FF)
-            * (1.0 / 512.0),
-        ),
-    )
-    offset = float(f32(float(max_offset) * float(mag)))
-
-    dir_x = float(f32(math.cos(float(dir_angle))))
-    dir_y = float(f32(math.sin(float(dir_angle))))
-    aim_jitter_x = float(f32(float(aim.x) + float(f32(float(dir_x) * float(offset)))))
-    aim_jitter_y = float(f32(float(aim.y) + float(f32(float(dir_y) * float(offset)))))
-
-    shot_dx = float(f32(float(aim_jitter_x) - float(player_pos.x)))
-    shot_dy = float(f32(float(aim_jitter_y) - float(player_pos.y)))
-    return float(heading_from_delta_f32(dx=float(shot_dx), dy=float(shot_dy)))
 
 
 def _apply_pellet_jitter(
@@ -305,7 +305,15 @@ def fire_weapon(ctx: WeaponFireCtx) -> WeaponFireResult:
 
     owner = owner_ref_for_player(player.index)
     projectile_owner = owner_ref_for_player_projectiles(state, player.index)
+    # Native encodes friendly fire in the owner id (-1 - player_index): with the
+    # cvar enabled, primary player shots can hit other players for 10 damage.
+    projectile_hits_players = bool(state.friendly_fire_enabled)
     shot_count = 1
+    # Native increments the accuracy counter only inside projectile_spawn /
+    # fx_spawn_secondary_projectile; particle weapons (flamethrowers, bubblegun)
+    # never count toward shots fired. The per-weapon usage counter keeps
+    # incrementing as the rewrite's most-used-weapon heuristic.
+    counts_accuracy_shots = True
     spawn_muzzle_after_projectile = bool(is_fire_bullets) or int(weapon_id) in _NATIVE_FIRE_MUZZLE_AFTER_PROJECTILE
     if not spawn_muzzle_after_projectile:
         _spawn_native_fire_muzzle_sprites(
@@ -357,6 +365,7 @@ def fire_weapon(ctx: WeaponFireCtx) -> WeaponFireResult:
                     type_id=type_id,
                     owner=projectile_owner,
                     travel_budget=meta,
+                    hits_players=projectile_hits_players,
                 )
                 if isinstance(speed_rule, ModuloSpeedScale):
                     assert pellet_speed_caller is not None
@@ -387,6 +396,7 @@ def fire_weapon(ctx: WeaponFireCtx) -> WeaponFireResult:
                 ),
             )
         case ParticleStreamMode(style=style, slow=slow):
+            counts_accuracy_shots = False
             if slow:
                 state.particles.spawn_particle_slow(
                     pos=muzzle,
@@ -421,15 +431,20 @@ def fire_weapon(ctx: WeaponFireCtx) -> WeaponFireResult:
                     type_id=type_id,
                     owner=projectile_owner,
                     travel_budget=travel_budget_for_type_id(type_id),
+                    hits_players=projectile_hits_players,
                 )
         case SwarmerDumpMode():
             # Mini-Rocket Swarmers -> secondary type 2 (fires the full clip in a spread).
-            rocket_count = max(1, int(player.weapon.ammo))
+            # Native spawns one rocket per integer counter step below the float ammo
+            # value (ceil), and zero rockets when firing with an empty/negative clip
+            # (reachable via Regression Bullets / Ammunition Within).
+            clip_ammo = float(player.weapon.ammo)
+            rocket_count = math.ceil(clip_ammo) if clip_ammo > 0.0 else 0
             if bool(state.preserve_bugs):
                 # Native bug: step scales by ammo (`ammo * pi/3`), which aliases to identical headings
                 # for some clip sizes (e.g. 6 rockets), causing visible clumping.
-                step = float(rocket_count) * (math.pi / 3.0)
-                angle = (shot_angle - math.pi) - step * float(rocket_count) * 0.5
+                step = clip_ammo * (math.pi / 3.0)
+                angle = (shot_angle - math.pi) - step * clip_ammo * 0.5
             else:
                 spread = math.pi * (2.0 / 3.0)
                 step = 0.0 if rocket_count <= 1 else spread / float(rocket_count - 1)
@@ -447,11 +462,14 @@ def fire_weapon(ctx: WeaponFireCtx) -> WeaponFireResult:
                     ),
                 )
                 angle += step
-            ammo_cost = float(rocket_count)
+            # Native subtracts the full clip value, zeroing the ammo even when
+            # the clip was fractional or negative.
+            ammo_cost = clip_ammo
             shot_count = rocket_count
 
     if 0 <= int(player.index) < len(state.shots_fired):
-        state.shots_fired[int(player.index)] += int(shot_count)
+        if counts_accuracy_shots:
+            state.shots_fired[int(player.index)] += int(shot_count)
         if 0 <= weapon_id < WEAPON_COUNT_SIZE:
             state.weapon_shots_fired[int(player.index)][weapon_id] += int(shot_count)
 

@@ -21,8 +21,10 @@ from grim.rand import Crand, CrandLike
 from grim.sfx_map import SfxId
 
 from ..bonuses import BonusId
+from ..bonuses.pool import BONUS_SPAWN_MARGIN
 from ..effects import EffectPool, FxQueue, FxQueueRotated
 from ..gameplay import (
+    _award_experience_once_from_reward,
     award_experience,
     award_experience_from_reward,
     survival_record_recent_death,
@@ -176,26 +178,27 @@ def _movement_delta_from_heading_f32(
     move_scale: float,
     move_speed: float,
 ) -> Vec2:
-    # Native movement path computes cos/sin in x87 precision and rounds only on the
-    # final velocity write (`creature_update_all` around 0x00426b85..0x00426bb1).
-    # Avoid pre-rounding direction components to float32 here.
+    # The game leaves the x87 in single-precision mode (the Direct3D 8 device
+    # init does not pass D3DCREATE_FPU_PRESERVE), so every multiply in the
+    # velocity chain rounds to f32; fsin/fcos still evaluate in extended
+    # precision internally, so their rounding lands in the first multiply
+    # (`creature_update_all` 0x426dab..0x426de6, validated against v14 capture
+    # vel channels: 164/166 walker ticks reproduce bit-exactly).
     radians = float(f32(heading)) - NATIVE_HALF_PI
 
     # Preserve native multiply order:
     # `vel = trig(heading - half_pi) * frame_dt * move_scale * move_speed * 30.0`
-    vx = math.cos(radians)
-    vx *= float(dt)
-    vx *= float(move_scale)
-    vx *= float(move_speed)
-    vx *= float(CREATURE_SPEED_SCALE)
+    vx = f32(math.cos(radians) * float(dt))
+    vx = f32(vx * float(move_scale))
+    vx = f32(vx * float(move_speed))
+    vx = f32(vx * float(CREATURE_SPEED_SCALE))
 
-    vy = math.sin(radians)
-    vy *= float(dt)
-    vy *= float(move_scale)
-    vy *= float(move_speed)
-    vy *= float(CREATURE_SPEED_SCALE)
+    vy = f32(math.sin(radians) * float(dt))
+    vy = f32(vy * float(move_scale))
+    vy = f32(vy * float(move_speed))
+    vy = f32(vy * float(CREATURE_SPEED_SCALE))
 
-    return Vec2(f32(vx), f32(vy))
+    return Vec2(vx, vy)
 
 
 def _velocity_from_delta_f32(delta: Vec2, *, dt: float) -> Vec2:
@@ -214,6 +217,14 @@ def _advance_pos_by_delta_f32(pos: Vec2, delta: Vec2) -> Vec2:
 
 def _owner_to_player_index(owner: OwnerRef) -> int | None:
     return owner.player_index()
+
+
+def pack_bonus_on_death_args(bonus_id: BonusId, amount_override: int) -> int:
+    """Native `link_index` encoding for BONUS_ON_DEATH carriers: low i16 holds
+    the bonus id, high i16 the amount/duration override (-1 = default)."""
+
+    packed = ((int(amount_override) & 0xFFFF) << 16) | (int(bonus_id) & 0xFFFF)
+    return packed - 0x1_0000_0000 if packed >= 0x8000_0000 else packed
 
 
 def _travel_budget_for_type_id(type_id: ProjectileTemplateId) -> float:
@@ -345,7 +356,11 @@ class _CreatureInteractionPlayerDeathRuntime(PlayerDeathRuntime):
 class _CreatureInteractionCreatureDamageRuntime(CreatureDamageRuntime):
     ctx: _CreatureInteractionCtx
 
-    def on_creature_lethal(self, creature_index: int, death_sfx: tuple[SfxId, ...]) -> None:
+    def on_creature_lethal(
+        self,
+        creature_index: int,
+        resolve_death_sfx: Callable[[], tuple[SfxId, ...]],
+    ) -> None:
         ctx = self.ctx
         creature = ctx.creature
         ctx.deaths.append(
@@ -361,7 +376,7 @@ class _CreatureInteractionCreatureDamageRuntime(CreatureDamageRuntime):
                 fx_queue=ctx.fx_queue,
             ),
         )
-        ctx.sfx.extend(death_sfx)
+        ctx.sfx.extend(resolve_death_sfx())
         if creature.active:
             ctx.pool._tick_dead(
                 creature,
@@ -391,7 +406,11 @@ class _CreaturePoolCreatureDamageRuntime(CreatureDamageRuntime):
     deaths: list[CreatureDeath]
     sfx: list[SfxId]
 
-    def on_creature_lethal(self, creature_index: int, death_sfx: tuple[SfxId, ...]) -> None:
+    def on_creature_lethal(
+        self,
+        creature_index: int,
+        resolve_death_sfx: Callable[[], tuple[SfxId, ...]],
+    ) -> None:
         self.deaths.append(
             self.pool.handle_death(
                 int(creature_index),
@@ -405,7 +424,7 @@ class _CreaturePoolCreatureDamageRuntime(CreatureDamageRuntime):
                 fx_queue=self.fx_queue,
             ),
         )
-        self.sfx.extend(death_sfx)
+        self.sfx.extend(resolve_death_sfx())
 
 
 def _creature_interaction_plaguebearer_spread(ctx: _CreatureInteractionCtx) -> None:
@@ -425,13 +444,9 @@ def _creature_interaction_energizer_eat(ctx: _CreatureInteractionCtx) -> None:
         return
 
     # Native stores `vel` as per-tick delta (not per-second). It applies movement
-    # as `pos += vel`, so reverting the just-applied movement subtracts `vel`.
-    creature.pos = (creature.pos - creature.vel).clamp_rect(
-        0.0,
-        0.0,
-        float(ctx.world_width),
-        float(ctx.world_height),
-    )
+    # as `pos += vel`, so reverting the just-applied movement subtracts `vel`
+    # with no bounds clamp.
+    creature.pos = creature.pos - creature.vel
 
     # Native reverts the just-applied movement whenever a creature gets within
     # 20 units of the target player, regardless of Energizer.
@@ -439,6 +454,11 @@ def _creature_interaction_energizer_eat(ctx: _CreatureInteractionCtx) -> None:
         return
     if float(creature.max_hp) >= 380.0:
         return
+
+    # Native double-pays the eat kill: a direct `exp += reward` store here,
+    # plus creature_handle_death's own award below.
+    if ctx.players:
+        _award_experience_once_from_reward(ctx.players[0], float(creature.reward_value))
 
     ctx.state.effects.spawn_burst(
         pos=creature.pos,
@@ -470,9 +490,10 @@ def _creature_interaction_energizer_eat(ctx: _CreatureInteractionCtx) -> None:
 
 
 def _creature_interaction_contact_damage(ctx: _CreatureInteractionCtx) -> None:
+    # Native has no aliveness re-check here: a creature plague-killed earlier
+    # in the same tick can still bite (the alive branch was chosen at tick
+    # start), drawing the attack-SFX rand and damaging the player.
     creature = ctx.creature
-    if not creature_lifecycle_is_alive(creature.lifecycle_stage):
-        return
     if float(creature.size) <= 16.0:
         return
     if float(ctx.state.bonuses.energizer) > 0.0:
@@ -540,17 +561,24 @@ def _creature_interaction_contact_damage(ctx: _CreatureInteractionCtx) -> None:
 
 
 def _creature_interaction_plaguebearer_contact_flag(ctx: _CreatureInteractionCtx) -> None:
+    # Native nests this inside the contact gates: size > 16, distance < 30,
+    # target player alive, and no Energizer.
+    creature = ctx.creature
+    if float(creature.size) <= 16.0:
+        return
+    if ctx.contact_dist_sq >= 30.0 * 30.0:
+        return
+    if float(ctx.player.health) <= 0.0:
+        return
     if float(ctx.state.bonuses.energizer) > 0.0:
         return
 
-    creature = ctx.creature
     if (
         bool(ctx.player.plaguebearer_active)
         and float(creature.hp) < 150.0
         and int(ctx.state.plaguebearer_infection_count) < 0x32
     ):
-        if ctx.contact_dist_sq < 30.0 * 30.0:
-            creature.plague_infected = True
+        creature.plague_infected = True
 
 
 def _creature_interaction_contact_kill_small(ctx: _CreatureInteractionCtx) -> None:
@@ -704,19 +732,17 @@ class CreaturePool:
         if not (0 <= int(player_index) < len(players)):
             return
         player = players[int(player_index)]
-        if float(player.health) <= 0.0:
-            return
 
+        # Native has no hp filters here: dead players' slots still update, and
+        # the current auto-target is used purely for its (possibly stale)
+        # position - corpses and recycled slots included. The demo auto-aim
+        # consumer re-scans with an hp filter.
         auto_target = int(player.auto_target)
         if not (0 <= auto_target < len(self._entries)):
             player.auto_target = int(creature_index)
             return
 
         current = self._entries[int(auto_target)]
-        if not current.active or float(current.hp) <= 0.0:
-            player.auto_target = int(creature_index)
-            return
-
         dist_new = Vec2.distance_sq(player.pos, creature.pos)
         current_origin = player.pos
         if preserve_bugs and int(player_index) != 0 and players:
@@ -1010,6 +1036,19 @@ class CreaturePool:
                     and (int(creature.flags) & _FLAG_AI7_LINK_TIMER) != 0
                 ):
                     creature_ai7_tick_link_timer(creature, dt_ms=dt_ms, rng=rng)
+                # Native's targeting block runs before the alive/dead split:
+                # fading corpses still switch their target player and feed the
+                # auto-target comparison.
+                if players:
+                    dead_target_player = self._resolve_target_player_index(creature, players)
+                    if (self._update_tick % _TARGET_REEVAL_PERIOD) != 0:
+                        self._update_player_auto_target(
+                            players=players,
+                            preserve_bugs=bool(state.preserve_bugs),
+                            player_index=int(dead_target_player),
+                            creature_index=int(idx),
+                            creature=creature,
+                        )
                 if creature_lifecycle_is_alive(creature.lifecycle_stage):
                     creature.lifecycle_stage = f32(float(creature.lifecycle_stage) - float(dt))
                 if dt > 0.0:
@@ -1116,20 +1155,27 @@ class CreaturePool:
             )
             creature.move_scale = float(ai.move_scale)
             if ai.self_damage is not None and ai.self_damage > 0.0:
-                creature.hp -= float(ai.self_damage)
-                if creature.hp <= 0.0:
-                    deaths.append(
-                        self.handle_death(
-                            idx,
-                            state=state,
-                            players=players,
-                            rng=rng,
-                            dt=float(dt),
-                            world_width=world_width,
-                            world_height=world_height,
-                            fx_queue=fx_queue,
-                        ),
-                    )
+                # Native link-death cleanup calls creature_apply_damage(idx,
+                # 1000.0, 1, zero): the full bullet path with heading-jitter
+                # rand, hit flash, and the lethal death-SFX roll.
+                from .damage import creature_apply_damage_with_lethal_followup
+
+                killed = creature_apply_damage_with_lethal_followup(
+                    creature,
+                    creature_index=int(idx),
+                    damage_amount=float(ai.self_damage),
+                    damage_type=CreatureDamageType.BULLET,
+                    impulse=Vec2(),
+                    owner=creature.last_hit_owner,
+                    dt=float(dt),
+                    players=players,
+                    rng=rng,
+                    preserve_bugs=bool(state.preserve_bugs),
+                    effects=state.effects,
+                    detail_preset=int(detail_preset),
+                    creature_damage_runtime=creature_damage_runtime,
+                )
+                if killed:
                     if creature.active:
                         self._tick_dead(
                             creature,
@@ -1182,6 +1228,36 @@ class CreaturePool:
                         _advance_pos_by_delta_f32(creature.pos, move_delta).clamp_rect(radius, radius, max_x, max_y),
                     )
 
+                # Native ticks owner-bound spawn slots inside the spawner movement
+                # branch, before this creature's plaguebearer/anim/ranged/contact
+                # rand draws; children spawned here are visited later in the same
+                # pass when their slot index is above the current one.
+                if (
+                    dt > 0.0
+                    and float(state.bonuses.freeze) <= 0.0
+                    and not bool(self.capture_spawn_events_authoritative)
+                    and (creature.flags & HAS_SPAWN_SLOT_FLAG) != 0
+                ):
+                    slot_index = creature.spawn_slot_index
+                    if slot_index is not None and 0 <= int(slot_index) < len(self.spawn_slots):
+                        slot = self.spawn_slots[int(slot_index)]
+                        if int(slot.owner_creature) == int(idx):
+                            child_template_id = tick_spawn_slot(slot, dt)
+                            if child_template_id is not None:
+                                plan = build_spawn_plan(
+                                    child_template_id,
+                                    creature.pos,
+                                    float(RANDOM_HEADING_SENTINEL),
+                                    rng,
+                                    spawn_env,
+                                )
+                                mapping, _ = self.spawn_plan(
+                                    plan,
+                                    rng=rng,
+                                    detail_preset=int(detail_preset),
+                                )
+                                spawned.extend(mapping)
+
             if (
                 players
                 and perk_active(players[0], PerkId.PLAGUEBEARER)
@@ -1197,13 +1273,15 @@ class CreaturePool:
                 creature.attack_cooldown -= dt
 
             # Native radioactive contact pulse runs after movement/AI/cooldown
-            # synthesis inside the live-creature branch.
-            if players and perk_active(players[0], PerkId.RADIOACTIVE):
-                radioactive_player = players[0]
-                dist = (creature.pos - radioactive_player.pos).length()
+            # synthesis inside the live-creature branch. The distance is measured
+            # to the creature's target player, the perk gate reads the global
+            # count (any player), the kill XP is credited to player 1, and the
+            # timer-fire requires the creature to still be alive (hp > 0).
+            if players and any(perk_active(p, PerkId.RADIOACTIVE) for p in players):
+                dist = (creature.pos - player.pos).length()
                 if dist < 100.0:
                     creature.collision_timer -= float(dt) * 1.5
-                    if creature.collision_timer < 0.0:
+                    if creature.collision_timer < 0.0 and float(creature.hp) > 0.0:
                         creature.collision_timer = CONTACT_DAMAGE_PERIOD
                         creature.hp -= (100.0 - dist) * 0.3
                         if fx_queue is not None:
@@ -1213,8 +1291,8 @@ class CreaturePool:
                             if creature.type_id == CreatureTypeId.LIZARD:
                                 creature.hp = 1.0
                             else:
-                                radioactive_player.experience = int(
-                                    float(radioactive_player.experience) + float(creature.reward_value),
+                                players[0].experience = int(
+                                    float(players[0].experience) + float(creature.reward_value),
                                 )
                                 creature.lifecycle_stage -= float(dt)
 
@@ -1287,34 +1365,6 @@ class CreaturePool:
             if interaction_ctx.skip_creature:
                 continue
 
-            # Tick owner-bound spawn slots at creature-loop tail so spawned children
-            # can still be visited later in the same update pass.
-            if (
-                dt > 0.0
-                and float(state.bonuses.freeze) <= 0.0
-                and not bool(self.capture_spawn_events_authoritative)
-                and (creature.flags & HAS_SPAWN_SLOT_FLAG) != 0
-            ):
-                slot_index = creature.spawn_slot_index
-                if slot_index is not None and 0 <= int(slot_index) < len(self.spawn_slots):
-                    slot = self.spawn_slots[int(slot_index)]
-                    if int(slot.owner_creature) == int(idx):
-                        child_template_id = tick_spawn_slot(slot, dt)
-                        if child_template_id is not None:
-                            plan = build_spawn_plan(
-                                child_template_id,
-                                creature.pos,
-                                float(RANDOM_HEADING_SENTINEL),
-                                rng,
-                                spawn_env,
-                            )
-                            mapping, _ = self.spawn_plan(
-                                plan,
-                                rng=rng,
-                                detail_preset=int(detail_preset),
-                            )
-                            spawned.extend(mapping)
-
         return CreatureUpdateResult(deaths=tuple(deaths), spawned=tuple(spawned), sfx=tuple(sfx))
 
     def handle_death(
@@ -1334,8 +1384,16 @@ class CreaturePool:
         """Run one-shot death side effects and return the `CreatureDeath` event."""
 
         creature = self._entries[int(idx)]
-        survival_record_recent_death(state, pos=creature.pos)
         if (creature.flags & CreatureFlags.BONUS_ON_DEATH) and creature.bonus_id is not None:
+            # Native `bonus_spawn_at` clamps through the creature pos pointer
+            # (also in rush, where no bonus spawns), moving the corpse to the
+            # 32-px world margin, and spawns a 16-particle pickup burst.
+            creature.pos = creature.pos.clamp_rect(
+                BONUS_SPAWN_MARGIN,
+                BONUS_SPAWN_MARGIN,
+                float(world_width) - BONUS_SPAWN_MARGIN,
+                float(world_height) - BONUS_SPAWN_MARGIN,
+            )
             state.bonus_pool.spawn_at(
                 pos=creature.pos,
                 bonus_id=creature.bonus_id,
@@ -1345,10 +1403,12 @@ class CreaturePool:
                 state=state,
                 world_width=world_width,
                 world_height=world_height,
+                detail_preset=int(detail_preset),
             )
             if not bool(state.preserve_bugs):
                 creature.bonus_id = None
                 creature.bonus_duration_override = None
+        survival_record_recent_death(state, pos=creature.pos)
         if not creature.active:
             # Native `creature_handle_death` gates its XP/bonus/freeze body under
             # `if (active != 0)`. Re-entrant callers (notably secondary
@@ -1455,6 +1515,14 @@ class CreaturePool:
         entry.bonus_duration_override = (
             int(init.bonus_duration_override) if init.bonus_duration_override is not None else None
         )
+        if (entry.flags & CreatureFlags.BONUS_ON_DEATH) and init.bonus_id is not None:
+            # Native packs the `bonus_spawn_at` args into link_index (low i16
+            # bonus id, high i16 amount/duration override); keep the field
+            # native-faithful even though death handling reads the typed fields.
+            entry.link_index = pack_bonus_on_death_args(
+                init.bonus_id,
+                -1 if init.bonus_duration_override is None else int(init.bonus_duration_override),
+            )
 
         entry.tint = RGBA.from_rgba(resolve_tint(init.tint))
 
@@ -1600,18 +1668,24 @@ class CreaturePool:
 
         if (creature.flags & CreatureFlags.SPLIT_ON_DEATH) and float(creature.size) > 35.0:
             for heading_offset, phase_seed_caller in (
-                (-math.pi / 2.0, RngCallerStatic.CREATURE_HANDLE_DEATH_SPLIT_CHILD_1_PHASE_SEED),
-                (math.pi / 2.0, RngCallerStatic.CREATURE_HANDLE_DEATH_SPLIT_CHILD_2_PHASE_SEED),
+                (-float(NATIVE_HALF_PI), RngCallerStatic.CREATURE_HANDLE_DEATH_SPLIT_CHILD_1_PHASE_SEED),
+                (float(NATIVE_HALF_PI), RngCallerStatic.CREATURE_HANDLE_DEATH_SPLIT_CHILD_2_PHASE_SEED),
             ):
                 child_idx = self._alloc_slot()
                 if child_idx is None:
                     continue
+                # Native `creature_alloc_slot` draws a phase seed (rand & 0x17f) that the
+                # subsequent struct copy from the parent immediately overwrites; only the
+                # draw itself matters for the stream.
+                rng.rand_tagged(RngCallerStatic.CREATURE_ALLOC_SLOT_PHASE_SEED)
                 child = msgspec.structs.replace(creature)
                 child.phase_seed = float(int(rng.rand_tagged(phase_seed_caller)) & 0xFF)
-                child.heading = _wrap_angle(float(creature.heading) + float(heading_offset))
-                child.target_heading = float(child.heading)
+                # Native stores `heading +- 1.5707964f` unwrapped and leaves
+                # `target_heading` as the parent's stale copy.
+                child.heading = float(f32(float(creature.heading) + float(heading_offset)))
                 child.hp = float(creature.max_hp) * 0.25
-                child.reward_value = float(child.reward_value) * (2.0 / 3.0)
+                # Native multiplies by the f32 literal 0.6666667.
+                child.reward_value = float(child.reward_value) * float(f32(0.6666667))
                 child.size = float(child.size) - 8.0
                 child.move_speed = float(child.move_speed) + 0.1
                 child.contact_damage = float(child.contact_damage) * 0.7

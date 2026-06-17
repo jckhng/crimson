@@ -20,7 +20,11 @@ const DEFAULT_OUT_NAME = "gameplay_diff_capture.jsonl";
 const DEFAULT_TRACKED_STATES = "6,7,8,9,10,12,14,18";
 const DEFAULT_CONSOLE_EVENTS =
   "start,ready,capture_shutdown,error,hook_error,hook_skip,tickless_event";
-const CAPTURE_FORMAT_VERSION = 12;
+const CAPTURE_FORMAT_VERSION = 15;
+// First rng caller of native run setup (terrain_generate prelude roll 1). The
+// rand state observed before this draw is the state a replay must seed from to
+// reproduce the run's setup draws (terrain stamps, quest build) value-for-value.
+const RUN_SETUP_FIRST_RNG_CALLER_STATIC = "0x004181cc";
 const LINK_BASE = ptr("0x00400000");
 const GAME_MODULE = "crimsonland.exe";
 const GRIM_MODULE = "grim.dll";
@@ -242,9 +246,10 @@ const CONFIG = {
   maxRngCallerKinds: parseLimitEnv("CRIMSON_FRIDA_RNG_CALLERS", -1, 0),
   enableRngRollLog: parseBoolEnv("CRIMSON_FRIDA_RNG_ROLL_LOG", true),
   maxRngRollLogEvents: parseLimitEnv("CRIMSON_FRIDA_MAX_RNG_ROLL_LOG_EVENTS", -1, 0),
-  maxRngOutsideTickHead: parseLimitEnv("CRIMSON_FRIDA_RNG_OUTSIDE_TICK_HEAD", 256, 0),
+  // Unlimited by default: fixture-grade captures must not trim any stream.
+  maxRngOutsideTickHead: parseLimitEnv("CRIMSON_FRIDA_RNG_OUTSIDE_TICK_HEAD", -1, 0),
   enableRngStateMirror: parseBoolEnv("CRIMSON_FRIDA_RNG_STATE_MIRROR", true),
-  maxCreatureDeltaIds: parseLimitEnv("CRIMSON_FRIDA_CREATURE_DELTA_IDS", 256, 1),
+  maxCreatureDeltaIds: parseLimitEnv("CRIMSON_FRIDA_CREATURE_DELTA_IDS", -1, 1),
   creatureSampleLimit: parseLimitEnv("CRIMSON_FRIDA_CREATURE_SAMPLE_LIMIT", -1, 0),
   projectileSampleLimit: parseLimitEnv("CRIMSON_FRIDA_PROJECTILE_SAMPLE_LIMIT", -1, 0),
   secondaryProjectileSampleLimit: parseLimitEnv("CRIMSON_FRIDA_SECONDARY_PROJECTILE_SAMPLE_LIMIT", -1, 0),
@@ -303,6 +308,8 @@ const FN = {
   input_primary_is_down: 0x004460f0,
   crt_srand: 0x00461739,
   crt_rand: 0x00461746,
+  // multithread CRT per-thread-data accessor; rand state lives at ptd+0x14.
+  crt_getptd: 0x004654b8,
   sfx_play: 0x0043d120,
   sfx_play_panned: 0x0043d260,
   sfx_play_exclusive: 0x0043d460,
@@ -522,6 +529,7 @@ const creatureDeathContextByTid = {};
 const bonusSpawnContextByTid = {};
 const inputContextByTid = {};
 const rngContextByTid = {};
+const crtPtdByTid = {};
 const srandContextByTid = {};
 const bloodSplatterContextByTid = {};
 const creatureUpdateMicroContextByTid = {};
@@ -541,7 +549,9 @@ const outState = {
   currentRunQuestMajor: -1,
   currentRunQuestMinor: -1,
   currentRunKey: "",
+  currentRunStarted: false,
   currentRunBootstrapQuestAttemptPending: false,
+  captureContractSuspendedRunKey: null,
   currentRunElapsedRawStartMs: null,
   currentRunElapsedRawLastMs: null,
   currentRunElapsedNormalizedMs: null,
@@ -568,10 +578,14 @@ const outState = {
   rngMirrorStateU32: null,
   rngMirrorMismatchCount: 0,
   rngMirrorUnknownCalls: 0,
+  lastGpurLeaveRngStateReal: null,
   rngSeedEpoch: 0,
   rngOutsideTickPendingHead: [],
   rngOutsideTickPendingCalls: 0,
   rngOutsideTickPendingDropped: 0,
+  rngOutsideTickPendingCallerCounts: {},
+  pendingRunSetupRng: null,
+  pendingRunPoolResidue: null,
   perkApplyOutsideTickPendingHead: [],
   perkApplyOutsideTickPendingCalls: 0,
   perkApplyOutsideTickPendingDropped: 0,
@@ -835,16 +849,25 @@ function _captureForceFlush() {
 }
 
 function emitCaptureContractError(errorCode, tickObj) {
+  const runKey = outState.currentRunKey || runKeyForTick(tickObj);
   const row = {
-    event: "error",
+    event: "run_error",
     error: String(errorCode || "capture_contract_error"),
     run_id: outState.runActive ? outState.currentRunId | 0 : null,
+    mode_id: outState.runActive ? outState.currentRunModeId | 0 : tickModeId(tickObj),
+    quest_stage_major: outState.runActive ? outState.currentRunQuestMajor | 0 : tickQuestMajor(tickObj),
+    quest_stage_minor: outState.runActive ? outState.currentRunQuestMinor | 0 : tickQuestMinor(tickObj),
     tick_index_global:
       tickObj && tickObj.tick_index != null ? tickObj.tick_index | 0 : null,
   };
   _captureWriteJsonLine(row, true);
-  writeLine(row);
-  shutdownCapture(String(errorCode || "capture_contract_error"));
+  writeLine(Object.assign({}, row, { event: "error" }));
+  if (runKey) outState.captureContractSuspendedRunKey = runKey;
+  try {
+    closeActiveRun("capture_contract_error", tickObj);
+  } catch (_) {
+    resetCurrentRunState();
+  }
   return null;
 }
 
@@ -1015,6 +1038,13 @@ function startCaptureFile(meta, outPath) {
 
 function closeActiveRun(reason, tickObj) {
   if (!outState.runActive) return;
+  if (!outState.currentRunStarted) {
+    resetCurrentRunState();
+    return;
+  }
+  // Draws between the run's last tick and its close belong to this run, not
+  // to the next tick's outside-before bag.
+  const outsideTail = takePendingOutsideRngRolls();
   const wrote = _captureWriteJsonLine(
     {
       event: "run_end",
@@ -1030,16 +1060,34 @@ function closeActiveRun(reason, tickObj) {
             ? null
             : outState.lastTickIndexGlobal | 0,
       ticks_written: outState.currentRunTickCount | 0,
+      rng_outside_tail: {
+        calls: outsideTail.calls | 0,
+        dropped: outsideTail.dropped | 0,
+        caller_counts: outsideTail.caller_counts || {},
+        head: (outsideTail.head || []).map(function (row) {
+          return {
+            value_15: row.value_15 == null ? null : row.value_15 | 0,
+            state_before_u32: row.state_before_u32 == null ? null : row.state_before_u32 >>> 0,
+            state_after_u32: row.state_after_u32 == null ? null : row.state_after_u32 >>> 0,
+            caller_static: row.caller_static == null ? null : String(row.caller_static),
+          };
+        }),
+      },
     },
     true,
   );
   if (wrote) _captureForceFlush();
+  resetCurrentRunState();
+}
+
+function resetCurrentRunState() {
   outState.runActive = false;
   outState.currentRunTickCount = 0;
   outState.currentRunModeId = -1;
   outState.currentRunQuestMajor = -1;
   outState.currentRunQuestMinor = -1;
   outState.currentRunKey = "";
+  outState.currentRunStarted = false;
   outState.currentRunBootstrapQuestAttemptPending = false;
   outState.currentRunElapsedRawStartMs = null;
   outState.currentRunElapsedRawLastMs = null;
@@ -1063,6 +1111,7 @@ function startRunForTick(tickObj, reason) {
     outState.currentRunQuestMajor = questMajor;
     outState.currentRunQuestMinor = questMinor;
     outState.currentRunKey = runKey;
+    outState.currentRunStarted = false;
     outState.currentRunBootstrapQuestAttemptPending =
       startReason === "first_tick" && (outState.currentRunModeId | 0) === GAME_MODE_QUESTS;
     outState.currentRunElapsedRawStartMs = null;
@@ -1070,6 +1119,21 @@ function startRunForTick(tickObj, reason) {
     outState.currentRunElapsedNormalizedMs = null;
     resetEntityUidStates();
     outState.runActive = true;
+    // The setup latch holds the rand state observed before the run's first
+    // terrain draw; replays must seed from it (the session srand seed is stale
+    // by run start). Consume it so a later run cannot inherit this one's.
+    const setupRng = outState.pendingRunSetupRng;
+    outState.pendingRunSetupRng = null;
+    const poolResidue = outState.pendingRunPoolResidue;
+    outState.pendingRunPoolResidue = null;
+    if (!setupRng) {
+      emitCaptureContractError("missing_run_setup_rng_state", tickObj);
+      return false;
+    }
+    if (!poolResidue) {
+      emitCaptureContractError("missing_run_setup_pool_residue", tickObj);
+      return false;
+    }
     const wrote = _captureWriteJsonLine(
       {
         event: "run_start",
@@ -1080,6 +1144,9 @@ function startRunForTick(tickObj, reason) {
         quest_stage_minor: outState.currentRunQuestMinor | 0,
         seed: runSeed >>> 0,
         seed_source: "crt_srand",
+        rng_state_at_run_setup: setupRng.state_before_u32 >>> 0,
+        rng_setup_caller_static: setupRng.caller_static,
+        pool_residue: poolResidue,
         player_count: playerCount,
         tick_index_global:
           tickObj && tickObj.tick_index != null ? tickObj.tick_index | 0 : null,
@@ -1090,6 +1157,7 @@ function startRunForTick(tickObj, reason) {
       emitCaptureContractError("run_start_write_failed", tickObj);
       return false;
     }
+    outState.currentRunStarted = true;
     _captureForceFlush();
     return true;
   } catch (error) {
@@ -1102,6 +1170,15 @@ function startRunForTick(tickObj, reason) {
 }
 
 function ensureRunForTick(tickObj) {
+  if (!outState.runActive && outState.captureContractSuspendedRunKey) {
+    const nextRunKey = runKeyForTick(tickObj);
+    const needsQuestRollover = consumeQuestAttemptRolloverForTick(tickObj);
+    if (nextRunKey === outState.captureContractSuspendedRunKey && !needsQuestRollover) {
+      return false;
+    }
+    outState.captureContractSuspendedRunKey = null;
+    return startRunForTick(tickObj, needsQuestRollover ? "quest_attempt" : "mode_or_stage_change");
+  }
   let needsRollover = outState.runActive ? consumeQuestAttemptRolloverForTick(tickObj) : false;
   if (!outState.runActive) {
     return startRunForTick(tickObj, "first_tick");
@@ -1400,7 +1477,7 @@ function validateAfterPlayers(players, expectedPlayers) {
     requireFiniteScalar(row.aim_y, "after.players[" + i + "].aim_y");
     requireFiniteScalar(row.aim_heading, "after.players[" + i + "].aim_heading");
     requireInt(row.weapon_id, "after.players[" + i + "].weapon_id");
-    requireInt(row.clip_size_i32, "after.players[" + i + "].clip_size_i32");
+    requireFiniteScalar(row.clip_size_f32, "after.players[" + i + "].clip_size_f32");
     requireFiniteScalar(row.ammo_f32, "after.players[" + i + "].ammo_f32");
     requireInt(row.reload_active_i32, "after.players[" + i + "].reload_active_i32");
     requireFiniteScalar(row.reload_timer, "after.players[" + i + "].reload_timer");
@@ -1469,7 +1546,11 @@ function simStateFromTick(tickObj, expectedPlayers) {
       weapon: {
         weapon_id: requireInt(player.weapon_id, "after.players[" + i + "].weapon_id"),
         ammo: requireFiniteScalar(player.ammo_f32, "after.players[" + i + "].ammo_f32"),
-        clip_size: requireInt(player.clip_size_i32, "after.players[" + i + "].clip_size_i32"),
+        // Native stores clip_size as an integral f32; emit the decoded value
+        // (clip_size_i32 is the raw bit pattern kept for forensics).
+        clip_size: Math.round(
+          requireFiniteScalar(player.clip_size_f32, "after.players[" + i + "].clip_size_f32"),
+        ),
         reload_active: requireInt(player.reload_active_i32, "after.players[" + i + "].reload_active_i32") !== 0,
         reload_timer: requireFiniteScalar(player.reload_timer, "after.players[" + i + "].reload_timer"),
         reload_timer_max: requireFiniteScalar(
@@ -1547,6 +1628,11 @@ function entitySamplesFromTick(tickObj) {
       orbit_angle: requireFiniteScalar(row.orbit_angle, "samples.creatures[" + i + "].orbit_angle"),
       orbit_radius: requireFiniteScalar(row.orbit_radius, "samples.creatures[" + i + "].orbit_radius"),
       lifecycle_stage: requireFiniteScalar(row.lifecycle_stage, "samples.creatures[" + i + "].lifecycle_stage"),
+      vel: {
+        x: requireFiniteScalar(requireObject(row.vel, "samples.creatures[" + i + "].vel").x, "samples.creatures[" + i + "].vel.x"),
+        y: requireFiniteScalar(row.vel.y, "samples.creatures[" + i + "].vel.y"),
+      },
+      move_speed: requireFiniteScalar(row.move_speed, "samples.creatures[" + i + "].move_speed"),
     });
   }
 
@@ -1674,6 +1760,38 @@ function rngStreamFromTick(tickObj) {
   return out;
 }
 
+function rngOutsideBagFromRows(bag, field) {
+  const src = requireObject(bag, field);
+  const calls = requireInt(src.calls, field + ".calls");
+  const dropped = requireInt(src.dropped, field + ".dropped");
+  if (calls < 0 || dropped < 0) {
+    failCaptureContract(field + " calls/dropped must be >= 0");
+  }
+  const callerCounts = {};
+  const srcCounts = src.caller_counts && typeof src.caller_counts === "object" ? src.caller_counts : {};
+  const countKeys = Object.keys(srcCounts);
+  for (let i = 0; i < countKeys.length; i++) {
+    callerCounts[String(countKeys[i])] = srcCounts[countKeys[i]] | 0;
+  }
+  const head = requireArray(src.head, field + ".head");
+  const rows = [];
+  for (let i = 0; i < head.length; i++) {
+    const row = requireObject(head[i], field + ".head[" + i + "]");
+    rows.push({
+      value_15: row.value_15 == null ? null : row.value_15 | 0,
+      state_before_u32: requireU32(row.state_before_u32, field + ".head[" + i + "].state_before_u32"),
+      state_after_u32: requireU32(row.state_after_u32, field + ".head[" + i + "].state_after_u32"),
+      caller_static: row.caller_static == null ? null : String(row.caller_static),
+    });
+  }
+  return {
+    calls: calls,
+    dropped: dropped,
+    caller_counts: callerCounts,
+    head: rows,
+  };
+}
+
 function timingSamplesFromTick(tickObj) {
   const out = [];
   const tickIndex = tickObj && tickObj.tick_index != null ? tickObj.tick_index | 0 : -1;
@@ -1745,6 +1863,17 @@ function buildTraceTickRow(tickObj) {
     const checkpointPlayers = requireNonEmptyArray(checkpoint.players, "checkpoint.players");
     requireU32(checkpoint.rng_state, "checkpoint.rng_state");
     const rngStream = rngStreamFromTick(tickObj);
+    const rngCalls = requireInt(tickObj.rng_calls, "rng_calls");
+    if (rngCalls !== rngStream.length) {
+      // The replay contract needs the complete in-tick stream; a truncated
+      // head (max_rng_head_per_tick override) is a capture error.
+      failCaptureContract(
+        "rng_calls " + rngCalls + " does not match rng_stream length " + rngStream.length
+      );
+    }
+    const rngOutsideBefore = rngOutsideBagFromRows(tickObj.rng_outside_before, "rng_outside_before");
+    const rngStateEnter = requireU32(tickObj.rng_state_enter_u32, "rng_state_enter_u32");
+    const rngStateLeave = requireU32(tickObj.rng_state_leave_u32, "rng_state_leave_u32");
     const timingSamples = timingSamplesFromTick(tickObj);
     if (timingSamples.length <= 0) {
       failCaptureContract("timing_samples must be non-empty");
@@ -1793,6 +1922,10 @@ function buildTraceTickRow(tickObj) {
       quest_stage_major: tickQuestMajor(tickObj),
       quest_stage_minor: tickQuestMinor(tickObj),
       replay_inputs: replayInputs,
+      rng_calls: rngCalls,
+      rng_outside_before: rngOutsideBefore,
+      rng_state_enter_u32: rngStateEnter,
+      rng_state_leave_u32: rngStateLeave,
       channels: {
         checkpoint: checkpoint,
         rng_stream: rngStream,
@@ -2112,6 +2245,43 @@ function runtimeToStatic(addr) {
   }
 }
 
+// The multithread CRT keeps the rand LCG state at per-thread-data + 0x14
+// (srand: `mov [ptd+0x14], seed`; rand: `imul/add` on the same slot). Reading
+// it from memory observes the REAL stream, including rand sites the
+// crt_rand hook never sees (inlined or otherwise unhooked draws); those show
+// up as LCG chain gaps between consecutive observed states.
+const CRT_PTD_RAND_STATE_OFFSET = 0x14;
+let crtGetPtdFn = null;
+
+function ensureCrtGetPtdFn() {
+  if (crtGetPtdFn != null) return crtGetPtdFn;
+  if (!fnPtrs.crt_getptd) return null;
+  try {
+    crtGetPtdFn = new NativeFunction(fnPtrs.crt_getptd, "pointer", [], "mscdecl");
+  } catch (_) {
+    crtGetPtdFn = null;
+  }
+  return crtGetPtdFn;
+}
+
+// Must execute on the observed thread (hook callbacks do); the ptd pointer is
+// stable per thread so only the first read per thread calls _getptd.
+function readCrtRandStateU32(threadId) {
+  try {
+    let ptd = crtPtdByTid[threadId];
+    if (!ptd) {
+      const fn = ensureCrtGetPtdFn();
+      if (!fn) return null;
+      ptd = fn();
+      if (!ptd || ptd.isNull()) return null;
+      crtPtdByTid[threadId] = ptd;
+    }
+    return ptd.add(CRT_PTD_RAND_STATE_OFFSET).readU32() >>> 0;
+  } catch (_) {
+    return null;
+  }
+}
+
 function isProjectileUpdateCaller(callerStatic) {
   if (callerStatic == null) return false;
   const addr = callerStatic >>> 0;
@@ -2322,7 +2492,9 @@ function readGameplayGlobalsCompact() {
     game_state_pending: readDataI32("game_state_pending"),
     frame_dt: readDataF32("frame_dt"),
     frame_dt_ms_i32: readDataI32("frame_dt_ms"),
-    frame_dt_ms_f32: readDataF32("frame_dt_ms"),
+    // The native global is an i32; emit its numeric value (a float read of
+    // the same address yields a denormal bit pattern).
+    frame_dt_ms_f32: readDataI32("frame_dt_ms"),
     time_played_ms: readDataI32("time_played_ms"),
     creature_active_count: readDataI32("creature_active_count"),
     creature_kill_count: readDataI32("creature_kill_count"),
@@ -2535,18 +2707,19 @@ function readSecondaryProjectileEntry(index) {
   return {
     index: index,
     active: active,
+    angle: captureNumber(safeReadF32(base.add(0x04))),
+    speed: captureNumber(safeReadF32(base.add(0x08))),
     pos: {
-      x: captureNumber(safeReadF32(base.add(0x04))),
-      y: captureNumber(safeReadF32(base.add(0x08))),
+      x: captureNumber(safeReadF32(base.add(0x0c))),
+      y: captureNumber(safeReadF32(base.add(0x10))),
     },
-    life_timer: captureNumber(safeReadF32(base.add(0x0c))),
-    angle: captureNumber(safeReadF32(base.add(0x10))),
     vel: {
       x: captureNumber(safeReadF32(base.add(0x14))),
       y: captureNumber(safeReadF32(base.add(0x18))),
     },
-    trail_timer: captureNumber(safeReadF32(base.add(0x1c))),
-    type_id: safeReadS32(base.add(0x20)),
+    type_id: safeReadS32(base.add(0x1c)),
+    trail_timer: captureNumber(safeReadF32(base.add(0x20))),
+    owner_id: -100,
     target_id: safeReadS32(base.add(0x24)),
   };
 }
@@ -2560,6 +2733,73 @@ function readActiveSecondaryProjectileSample(limit) {
     if (!p) continue;
     out.push(p);
     if (normalizedLimit >= 0 && out.length >= normalizedLimit) break;
+  }
+  return out;
+}
+
+function readCreatureSlotResidue(index) {
+  // Full persistent-field snapshot of one creature slot. `creature_reset_all`
+  // (0x4281e0) clears only `active`, so a run inherits every other field from
+  // the previous occupant; replays seed their pool from this snapshot.
+  const pool = dataPtrs.creature_pool;
+  const base = pool.add(index * STRIDES.creature);
+  return {
+    index: index,
+    active: safeReadU8(base),
+    phase_seed: captureNumber(safeReadF32(base.add(0x04))),
+    state_flag: safeReadU8(base.add(0x08)),
+    collision_flag: safeReadU8(base.add(0x09)),
+    collision_timer: captureNumber(safeReadF32(base.add(0x0c))),
+    lifecycle_stage: captureNumber(safeReadF32(base.add(0x10))),
+    pos: {
+      x: captureNumber(safeReadF32(base.add(0x14))),
+      y: captureNumber(safeReadF32(base.add(0x18))),
+    },
+    vel: {
+      x: captureNumber(safeReadF32(base.add(0x1c))),
+      y: captureNumber(safeReadF32(base.add(0x20))),
+    },
+    hp: captureNumber(safeReadF32(base.add(0x24))),
+    max_hp: captureNumber(safeReadF32(base.add(0x28))),
+    heading: captureNumber(safeReadF32(base.add(0x2c))),
+    target_heading: captureNumber(safeReadF32(base.add(0x30))),
+    size: captureNumber(safeReadF32(base.add(0x34))),
+    hit_flash_timer: captureNumber(safeReadF32(base.add(0x38))),
+    tint: {
+      r: captureNumber(safeReadF32(base.add(0x3c))),
+      g: captureNumber(safeReadF32(base.add(0x40))),
+      b: captureNumber(safeReadF32(base.add(0x44))),
+      a: captureNumber(safeReadF32(base.add(0x48))),
+    },
+    force_target: safeReadS32(base.add(0x4c)),
+    target: {
+      x: captureNumber(safeReadF32(base.add(0x50))),
+      y: captureNumber(safeReadF32(base.add(0x54))),
+    },
+    contact_damage: captureNumber(safeReadF32(base.add(0x58))),
+    move_speed: captureNumber(safeReadF32(base.add(0x5c))),
+    attack_cooldown: captureNumber(safeReadF32(base.add(0x60))),
+    reward_value: captureNumber(safeReadF32(base.add(0x64))),
+    type_id: safeReadS32(base.add(0x6c)),
+    target_player: safeReadS32(base.add(0x70)),
+    link_index: safeReadS32(base.add(0x78)),
+    target_offset: {
+      x: captureNumber(safeReadF32(base.add(0x7c))),
+      y: captureNumber(safeReadF32(base.add(0x80))),
+    },
+    orbit_angle: captureNumber(safeReadF32(base.add(0x84))),
+    orbit_radius_u32: safeReadU32(base.add(0x88)),
+    flags: safeReadS32(base.add(0x8c)),
+    ai_mode: safeReadS32(base.add(0x90)),
+    anim_phase: captureNumber(safeReadF32(base.add(0x94))),
+  };
+}
+
+function readCreaturePoolResidue() {
+  if (!dataPtrs.creature_pool) return null;
+  const out = [];
+  for (let i = 0; i < COUNTS.creatures; i++) {
+    out.push(readCreatureSlotResidue(i));
   }
   return out;
 }
@@ -2583,6 +2823,11 @@ function readCreatureEntry(index) {
       x: captureNumber(safeReadF32(base.add(0x14))),
       y: captureNumber(safeReadF32(base.add(0x18))),
     },
+    vel: {
+      x: captureNumber(safeReadF32(base.add(0x1c))),
+      y: captureNumber(safeReadF32(base.add(0x20))),
+    },
+    move_speed: captureNumber(safeReadF32(base.add(0x5c))),
     hp: captureNumber(safeReadF32(base.add(0x24))),
     type_id: safeReadS32(base.add(0x6c)),
     target_player: safeReadS32(base.add(0x70)),
@@ -2971,7 +3216,8 @@ function diffCreatureDigest(beforeDigest, afterDigest) {
 
   const addedHead = [];
   const removedHead = [];
-  const maxHead = Math.max(1, CONFIG.maxCreatureDeltaIds | 0);
+  const configuredDeltaIds = CONFIG.maxCreatureDeltaIds | 0;
+  const maxHead = configuredDeltaIds < 0 ? Infinity : Math.max(1, configuredDeltaIds);
   const afterEntries = afterDigest.active_entries || {};
   const beforeEntries = beforeDigest.active_entries || {};
 
@@ -3391,6 +3637,7 @@ function makeTickContext() {
       outside_before_calls: outsideRngBefore.calls,
       outside_before_dropped: outsideRngBefore.dropped,
       outside_before_head: outsideRngBefore.head,
+      outside_before_caller_counts: outsideRngBefore.caller_counts,
       mirror_mismatch_total_enter: outState.rngMirrorMismatchCount,
       mirror_unknown_total_enter: outState.rngMirrorUnknownCalls,
     },
@@ -3761,6 +4008,14 @@ function stepCrtRandState(stateU32) {
 
 function queueOutsideRngRoll(rollRow) {
   outState.rngOutsideTickPendingCalls += 1;
+  // Per-caller counts are exhaustive: every outside-tick draw is attributed
+  // even when the detailed head is capped.
+  const callerKey = rollRow && rollRow.caller_static ? String(rollRow.caller_static) : "unknown";
+  if (outState.rngOutsideTickPendingCallerCounts[callerKey] != null) {
+    outState.rngOutsideTickPendingCallerCounts[callerKey] += 1;
+  } else {
+    outState.rngOutsideTickPendingCallerCounts[callerKey] = 1;
+  }
   const cap = CONFIG.maxRngOutsideTickHead;
   if (cap === 0) {
     outState.rngOutsideTickPendingDropped += 1;
@@ -3777,13 +4032,16 @@ function takePendingOutsideRngRolls() {
   const head = outState.rngOutsideTickPendingHead;
   const calls = outState.rngOutsideTickPendingCalls;
   const dropped = outState.rngOutsideTickPendingDropped;
+  const callerCounts = outState.rngOutsideTickPendingCallerCounts;
   outState.rngOutsideTickPendingHead = [];
   outState.rngOutsideTickPendingCalls = 0;
   outState.rngOutsideTickPendingDropped = 0;
+  outState.rngOutsideTickPendingCallerCounts = {};
   return {
     head: head,
     calls: calls,
     dropped: dropped,
+    caller_counts: callerCounts,
   };
 }
 
@@ -3847,7 +4105,7 @@ function emitRngRollEvent(rollRow) {
   });
 }
 
-function registerRngRoll(value, callerStaticHex, callerLabel) {
+function registerRngRoll(value, callerStaticHex, callerLabel, stateBeforeRealU32) {
   let valueI32 = null;
   if (Number.isFinite(value)) {
     valueI32 = value | 0;
@@ -3864,21 +4122,32 @@ function registerRngRoll(value, callerStaticHex, callerLabel) {
   const tick = outState.currentTick;
   const seq = outState.rngCallSeq;
   const tickCallIndex = tick ? tick.rng.calls + 1 : null;
-  const stateBeforeU32 =
+  const mirrorBeforeU32 =
     CONFIG.enableRngStateMirror && outState.rngMirrorStateU32 != null ? outState.rngMirrorStateU32 >>> 0 : null;
+  // The real memory state is authoritative; the software mirror only models
+  // hooked draws, so mirror-vs-real divergence is evidence of unhooked draws.
+  const stateBeforeU32 = stateBeforeRealU32 != null ? stateBeforeRealU32 >>> 0 : mirrorBeforeU32;
   const stateAfterU32 = stateBeforeU32 == null ? null : stepCrtRandState(stateBeforeU32);
-  const expectedValue15 = stateAfterU32 == null ? null : (stateAfterU32 >>> 16) & 0x7fff;
+  const expectedValue15 =
+    mirrorBeforeU32 == null ? null : (stepCrtRandState(mirrorBeforeU32) >>> 16) & 0x7fff;
   let mirrorMatch = null;
   if (CONFIG.enableRngStateMirror) {
-    if (stateAfterU32 == null) {
+    if (expectedValue15 == null) {
       outState.rngMirrorUnknownCalls += 1;
     } else if (valueI32 != null) {
       mirrorMatch = ((valueI32 & 0x7fff) >>> 0) === (expectedValue15 >>> 0);
       if (!mirrorMatch) outState.rngMirrorMismatchCount += 1;
     }
   }
-  if (CONFIG.enableRngStateMirror && stateAfterU32 != null) {
-    outState.rngMirrorStateU32 = stateAfterU32 >>> 0;
+  if (CONFIG.enableRngStateMirror) {
+    // The mirror resyncs to the real chain when available so mirror_match
+    // flags each unhooked-draw gap once instead of permanently after the
+    // first gap.
+    if (stateAfterU32 != null) {
+      outState.rngMirrorStateU32 = stateAfterU32 >>> 0;
+    } else if (mirrorBeforeU32 != null) {
+      outState.rngMirrorStateU32 = stepCrtRandState(mirrorBeforeU32) >>> 0;
+    }
   }
 
   const rollRow = {
@@ -3899,6 +4168,22 @@ function registerRngRoll(value, callerStaticHex, callerLabel) {
     expected_value_15: expectedValue15,
     mirror_match: mirrorMatch,
   };
+
+  if (
+    rollRow.caller_static === RUN_SETUP_FIRST_RNG_CALLER_STATIC &&
+    rollRow.state_before_u32 != null
+  ) {
+    // Terrain generation begins a fresh run setup; the latest latch before
+    // run_start wins so restarts and quest retries re-latch naturally.
+    outState.pendingRunSetupRng = {
+      state_before_u32: rollRow.state_before_u32 >>> 0,
+      caller_static: String(rollRow.caller_static),
+      seq: rollRow.seq >>> 0,
+    };
+    // The pool is stable between creature_reset_all and the run's first tick;
+    // snapshot the residue the run will inherit alongside the rng latch.
+    outState.pendingRunPoolResidue = readCreaturePoolResidue();
+  }
 
   if (!tick) {
     outState.rngCallsOutsideTick += 1;
@@ -4260,10 +4545,14 @@ function finalizeTick() {
       : globals.creature_active_count == null
         ? -1
         : globals.creature_active_count;
+  // Real memory state at gpur leave is authoritative for the checkpoint; the
+  // hooked-draws mirror is only the fallback when the ptd read is unavailable.
   const rngStateForCheckpoint =
-    CONFIG.enableRngStateMirror && outState.rngMirrorStateU32 != null
-      ? outState.rngMirrorStateU32 >>> 0
-      : null;
+    outState.lastGpurLeaveRngStateReal != null
+      ? outState.lastGpurLeaveRngStateReal >>> 0
+      : CONFIG.enableRngStateMirror && outState.rngMirrorStateU32 != null
+        ? outState.rngMirrorStateU32 >>> 0
+        : null;
   const diagnostics = {
     sampling_phase: "post_gameplay_update_and_render",
     timing: timing,
@@ -4349,6 +4638,16 @@ function finalizeTick() {
     },
     input_player_keys: tick.input_player_keys,
     rng_stream: tick.rng.head,
+    rng_calls: tick.rng.calls | 0,
+    rng_outside_before: {
+      calls: tick.rng.outside_before_calls | 0,
+      dropped: tick.rng.outside_before_dropped | 0,
+      caller_counts: tick.rng.outside_before_caller_counts || {},
+      head: tick.rng.outside_before_head || [],
+    },
+    rng_state_enter_u32: tick.rng_state_enter_real == null ? null : tick.rng_state_enter_real >>> 0,
+    rng_state_leave_u32:
+      outState.lastGpurLeaveRngStateReal == null ? null : outState.lastGpurLeaveRngStateReal >>> 0,
     diagnostics: diagnostics,
     input_approx: buildInputApprox(afterPlayers, tick),
     frame_dt_ms: frameDtMs,
@@ -4419,6 +4718,7 @@ function installHooks() {
         return;
       }
       outState.currentTick = makeTickContext();
+      outState.currentTick.rng_state_enter_real = readCrtRandStateU32(this.threadId);
       _consumePendingTimingSamplesIntoTick(outState.currentTick);
       recordTimingSample("gpur_enter", "snapshot", {
         globals:
@@ -4430,6 +4730,7 @@ function installHooks() {
       });
     },
     onLeave() {
+      outState.lastGpurLeaveRngStateReal = readCrtRandStateU32(this.threadId);
       finalizeTick();
     },
   });
@@ -4779,10 +5080,9 @@ function installHooks() {
           seedU32 = null;
         }
         if (seedU32 == null) {
-          const errorRow = { event: "hook_error", name: "crt_srand", error: "missing_seed_arg" };
-          _captureWriteJsonLine(errorRow, true);
-          writeLine(errorRow);
-          shutdownCapture("crt_srand_missing_seed");
+          // Use the tagged contract error row; finalize rejects unknown
+          // event tags with an opaque decode error otherwise.
+          emitCaptureContractError("crt_srand_missing_seed", null);
           return;
         }
         srandContextByTid[this.threadId] = {
@@ -4816,6 +5116,7 @@ function installHooks() {
         rngContextByTid[this.threadId] = {
           caller: CONFIG.includeCaller ? formatCaller(this.returnAddress) : null,
           caller_static: callerStatic == null ? null : toHex(callerStatic, 8),
+          state_before_real: readCrtRandStateU32(this.threadId),
         };
       },
       onLeave(retval) {
@@ -4827,7 +5128,12 @@ function installHooks() {
         } catch (_) {
           value = null;
         }
-        const roll = registerRngRoll(value, ctx ? ctx.caller_static : null, ctx ? ctx.caller : null);
+        const roll = registerRngRoll(
+          value,
+          ctx ? ctx.caller_static : null,
+          ctx ? ctx.caller : null,
+          ctx ? ctx.state_before_real : null
+        );
         emitRawEvent({
           event: "crt_rand",
           value_i32: value,

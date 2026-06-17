@@ -15,7 +15,7 @@ from grim.rand import CallerStatic, Crand, CrandLike
 from .creatures.damage_runtime import CreatureDamageRuntime, DirectCreatureDamageRuntime
 from .creatures.lifecycle import creature_lifecycle_is_collidable
 from .effects_atlas import EffectId
-from .math_parity import f32
+from .math_parity import NATIVE_TAU, f32
 from .owner_ref import OwnerRef
 from .rng_caller_static import RngCallerStatic
 
@@ -209,7 +209,8 @@ class ParticlePool:
                 dist_sq = f32(f32(float(dx) * float(dx)) + f32(float(dy) * float(dy)))
                 dist = f32(f32(math.sqrt(float(dist_sq))) - float(radius))
                 threshold = f32(f32(float(size) * 0.14285715) + 3.0)
-                if float(threshold) < float(dist):
+                # Native acceptance is strict (`dist < threshold`); reject equality.
+                if float(threshold) <= float(dist):
                     continue
                 return int(creature_idx)
 
@@ -315,14 +316,28 @@ class ParticlePool:
                         entry.pos = creature.pos
                         entry.vel = Vec2()
                     else:
-                        entry.angle = float(entry.angle) % math.tau
-                        hit_angle = Vec2(
-                            (entry.pos.x - entry.vel.x * dt) - creature.pos.x,
-                            (entry.pos.y - entry.vel.y * dt) - creature.pos.y,
-                        ).to_angle()
-                        hit_angle = float(hit_angle) % math.tau
-                        deflect_step = math.tau * 0.2
-                        if float(entry.angle) <= float(hit_angle):
+                        # Native wraps the stored angle iteratively with the f32
+                        # tau literal (6.2831855), keeps the atan2 hit angle in
+                        # extended precision for its wrap, and deflects by the
+                        # f32 constant 1.2566371.
+                        angle = float(entry.angle)
+                        while float(NATIVE_TAU) < angle:
+                            angle = float(f32(angle - float(NATIVE_TAU)))
+                        while angle < 0.0:
+                            angle = float(f32(angle + float(NATIVE_TAU)))
+                        entry.angle = angle
+                        hit_angle = float(
+                            Vec2(
+                                (entry.pos.x - entry.vel.x * dt) - creature.pos.x,
+                                (entry.pos.y - entry.vel.y * dt) - creature.pos.y,
+                            ).to_angle(),
+                        )
+                        while float(NATIVE_TAU) < hit_angle:
+                            hit_angle -= float(NATIVE_TAU)
+                        while hit_angle < 0.0:
+                            hit_angle += float(NATIVE_TAU)
+                        deflect_step = float(f32(1.2566371))
+                        if float(entry.angle) <= hit_angle:
                             entry.angle = f32(float(entry.angle) + deflect_step)
                         else:
                             entry.angle = f32(float(entry.angle) - deflect_step)
@@ -540,7 +555,9 @@ class FxQueue:
             width=w,
             height=w,
             rotation=rotation,
-            rgba=RGBA(gray, gray, gray, 1.0),
+            # Native keeps the statically initialized alpha (0x3f47ae14);
+            # only the gray channels are re-rolled per call.
+            rgba=RGBA(gray, gray, gray, 0.7799999713897705),
         )
 
 

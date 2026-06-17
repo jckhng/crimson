@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import msgspec
+
+if TYPE_CHECKING:
+    from ..persistence.save_status import GameStatusData
+
+
+def advance_quest_unlocks(status: GameStatusData, *, next_unlock: int, hardcore: bool) -> None:
+    """Advance quest unlock progression on completion.
+
+    Native `quest_mode_update` always raises `_quest_unlock_index`; hardcore
+    completion additionally raises `_quest_unlock_index_full`.
+    """
+    if int(next_unlock) > int(status.quest_unlock_index):
+        status.quest_unlock_index = int(next_unlock)
+    if hardcore and int(next_unlock) > int(status.quest_unlock_index_full):
+        status.quest_unlock_index_full = int(next_unlock)
 
 
 class QuestFinalTime(msgspec.Struct, frozen=True):
@@ -69,18 +86,22 @@ def compute_quest_final_time(
     """
 
     base_ms = int(base_time_ms)
+    # Native converts health through __ftol (truncation toward zero), not
+    # rounding.
     if player_health_values is not None and len(player_health_values) > 0:
         life_bonus_ms = 0
         for health in player_health_values:
-            life_bonus_ms += int(round(float(health)))
+            life_bonus_ms += int(math.trunc(float(health)))
     else:
-        life_bonus_ms = int(round(float(player_health)))
+        life_bonus_ms = int(math.trunc(float(player_health)))
         if player2_health is not None:
-            life_bonus_ms += int(round(float(player2_health)))
+            life_bonus_ms += int(math.trunc(float(player2_health)))
 
     unpicked_perk_bonus_ms = max(0, int(pending_perk_count)) * 1000
     final_ms = base_ms - int(life_bonus_ms) - int(unpicked_perk_bonus_ms)
-    if final_ms < 1:
+    # Native records negative final times; only an exactly-zero result is
+    # remapped to 1 ms.
+    if final_ms == 0:
         final_ms = 1
 
     return QuestFinalTime(

@@ -104,8 +104,11 @@ class BonusPool:
         return [entry for entry in self._entries if entry.bonus_id != BonusId.UNUSED]
 
     def _alloc_slot(self) -> BonusEntry | None:
+        # Native bonus_alloc_slot checks only `bonus_id == NONE`, so a slot
+        # whose bonus expired and was then picked (linger with UNUSED id) is
+        # immediately reusable.
         for entry in self._entries:
-            if _bonus_entry_is_empty(entry):
+            if entry.bonus_id == BonusId.UNUSED:
                 return entry
         return None
 
@@ -134,6 +137,8 @@ class BonusPool:
         state: GameplayState,
         world_width: float = 1024.0,
         world_height: float = 1024.0,
+        detail_preset: int = 5,
+        emit_burst: bool = True,
     ) -> BonusEntry | None:
         if state.game_mode == GameMode.RUSH:
             return None
@@ -159,6 +164,17 @@ class BonusPool:
             meta = BONUS_BY_ID.get(bonus_id)
             amount = int(meta.native_amount or 0) if meta is not None else 0
         entry.amount = int(amount)
+
+        if emit_burst:
+            # Native `bonus_spawn_at` always spawns a 16-particle burst
+            # (4 crt_rand draws each). The tutorial writes the pool directly
+            # in native code and emits its own 12-particle burst instead.
+            state.effects.spawn_burst(
+                pos=entry.pos,
+                count=16,
+                rng=state.rng,
+                detail_preset=int(detail_preset),
+            )
         return entry
 
     def spawn_at_pos(
@@ -389,6 +405,9 @@ class BonusPool:
             if entry.picked:
                 continue
 
+            # Native's player loop has no break: every player inside the
+            # pickup radius applies the bonus this tick (a nuke detonates
+            # twice, both players gain shield, and both consume RNG).
             picked_now = False
             for player in players:
                 if Vec2.distance_sq(entry.pos, player.pos) < BONUS_PICKUP_RADIUS * BONUS_PICKUP_RADIUS:
@@ -416,7 +435,6 @@ class BonusPool:
                         ),
                     )
                     picked_now = True
-                    break
 
             if expired_to_unused and not picked_now:
                 self._clear_entry(entry)

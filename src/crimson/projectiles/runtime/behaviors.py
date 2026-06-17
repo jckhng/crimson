@@ -15,7 +15,7 @@ from ...creatures.damage_types import CreatureDamageType
 from ...creatures.lifecycle import creature_lifecycle_is_collidable
 from ...creatures.spawn import CreatureFlags
 from ...effects import EffectPool
-from ...math_parity import f32
+from ...math_parity import NATIVE_HALF_PI, NATIVE_PI, f32
 from ...owner_ref import OwnerRef
 from ...rng_caller_static import RngCallerStatic
 from ...weapons import weapon_entry_for_projectile_type_id
@@ -29,7 +29,7 @@ from ..types import (
     Projectile,
     ProjectileTemplateId,
 )
-from .collision import _apply_damage_to_creature, _hit_radius_for
+from .collision import _apply_damage_to_creature, _within_native_find_radius
 
 if TYPE_CHECKING:
     from ...creatures.runtime import CreatureState
@@ -48,6 +48,7 @@ class _ProjectileUpdateCtx(msgspec.Struct):
     effects: EffectPool | None
     sfx_queue: MutableSequence[SfxId] | None
     creature_damage_runtime: CreatureDamageRuntime
+    sync_creature_index: Callable[[int], None] | None = None
 
 
 class _ProjectileHitInfo(msgspec.Struct):
@@ -62,16 +63,18 @@ class _ProjectileHitPerkCtx(msgspec.Struct):
     proj: Projectile
     creature: CreatureState
     rng: CrandLike
-    owner_perk_active: Callable[[OwnerRef, int], bool]
-    poison_idx: int
+    poison_bullets_active: bool
 
 
 _ProjectileHitPerkHook = Callable[[_ProjectileHitPerkCtx], None]
 
 
 def _projectile_hit_perk_poison_bullets(ctx: _ProjectileHitPerkCtx) -> None:
+    # Native gates on the global perk count, so the rand is drawn for every
+    # projectile hit while any player owns the perk - including creature-owned
+    # projectiles such as splitter children and shock-chain segments.
     if (
-        ctx.owner_perk_active(ctx.proj.owner, int(ctx.poison_idx))
+        ctx.poison_bullets_active
         and (ctx.rng.rand_tagged(RngCallerStatic.PROJECTILE_UPDATE_POISON_BULLETS_GATE) & 7) == 1
     ):
         ctx.creature.flags |= CreatureFlags.SELF_DAMAGE_TICK
@@ -108,9 +111,13 @@ def _linger_ion_aoe(
             continue
         if not creature_lifecycle_is_collidable(creature.lifecycle_stage):
             continue
-        creature_radius = _hit_radius_for(creature)
-        hit_r = radius + creature_radius
-        if Vec2.distance_sq(proj.pos, creature.pos) <= hit_r * hit_r:
+        # Native uses the strict sqrt-form predicate from creature_find_in_radius.
+        if _within_native_find_radius(
+            origin=proj.pos,
+            target=creature.pos,
+            radius=float(radius),
+            target_size=float(creature.size),
+        ):
             _apply_damage_to_creature(
                 ctx.creatures,
                 creature_idx,
@@ -227,7 +234,10 @@ def _post_hit_ion_rifle(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) -> N
 
             origin = creatures[hit_creature]
             target = creatures[best_idx]
-            angle = (target.pos - origin.pos).to_heading()
+            # Native stores `(float)(atan2(dy, dx) - 1.5707964 - 3.1415927)`
+            # with a single f32 spill (differs from to_heading() by 2*pi).
+            delta = target.pos - origin.pos
+            angle = float(f32(math.atan2(float(delta.y), float(delta.x)) - NATIVE_HALF_PI - NATIVE_PI))
 
             prev_guard = bool(runtime_state.bonus_spawn_guard)
             runtime_state.bonus_spawn_guard = True
@@ -281,6 +291,10 @@ def _post_hit_plasma_cannon(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) 
     )
 
 
+def _no_death_sfx() -> tuple[SfxId, ...]:
+    return ()
+
+
 def _post_hit_shrinkifier(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) -> None:
     _spawn_shrinkifier_hit_effects(
         ctx.effects,
@@ -293,21 +307,20 @@ def _post_hit_shrinkifier(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) ->
     new_size = float(creature.size) * 0.65
     creature.size = new_size
     if new_size < 16.0:
-        _apply_damage_to_creature(
-            ctx.creatures,
-            int(hit.hit_idx),
-            float(creature.hp) + 1.0,
-            damage_type=CreatureDamageType.BULLET,
-            impulse=Vec2(),
-            owner=hit.proj.owner,
-            creature_damage_runtime=ctx.creature_damage_runtime,
-        )
+        # Native calls creature_handle_death directly: no damage pipeline, so no
+        # heading-jitter or death-SFX rand draws, and hp stays positive so the
+        # generic chip damage after this hook still applies.
+        ctx.creature_damage_runtime.on_creature_lethal(int(hit.hit_idx), _no_death_sfx)
     hit.proj.life_timer = 0.25
 
 
 def _post_hit_pulse_gun(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) -> None:
     creature = ctx.creatures[int(hit.hit_idx)]
     creature.pos = creature.pos + hit.move * 3.0
+    # Native re-scans the pool per query, so later projectiles this tick see
+    # the pushed creature at its new position; resync the spatial hash.
+    if ctx.sync_creature_index is not None:
+        ctx.sync_creature_index(int(hit.hit_idx))
 
 
 def _post_hit_plague_spreader(ctx: _ProjectileUpdateCtx, hit: _ProjectileHitInfo) -> None:

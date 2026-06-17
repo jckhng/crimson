@@ -52,9 +52,10 @@ pub fn weaponAssignPlayer(
     player.weapon.clip_size = clip_size;
     player.weapon.ammo = @floatFromInt(clip_size);
     player.weapon_reset_latch = 0;
-    player.weapon.reload_active = false;
+    // Native resets only ammo, the reset latch, shot cooldown, reload timer,
+    // and aux timer; reload_active and reload_timer_max keep their previous
+    // values across a weapon pickup mid-reload.
     player.weapon.reload_timer = 0.0;
-    player.weapon.reload_timer_max = 0.0;
     player.weapon.shot_cooldown = 0.0;
     player.aux_timer = 2.0;
 }
@@ -120,6 +121,22 @@ fn playerPerkActive(player: *const PlayerState, perk_id: PerkId) bool {
     return player.perk_counts.get(perk_id) > 0;
 }
 
+pub fn resetPlayerWeaponNative(player: *PlayerState) void {
+    // Port of the weapon block in `player_reset_all` (0x41fc80): native
+    // resets every run to a hardcoded 10-round pistol with a primed 1.0s
+    // reload duration and a decaying 0.8s shot cooldown, without going
+    // through weapon assignment.
+    player.weapon = .{
+        .weapon_id = WeaponId.pistol,
+        .clip_size = 10,
+        .ammo = 10.0,
+        .reload_active = false,
+        .reload_timer = 0.0,
+        .reload_timer_max = 1.0,
+        .shot_cooldown = 0.8,
+    };
+}
+
 pub fn resetPlayers(
     players: []PlayerState,
     world_size: f32,
@@ -137,7 +154,7 @@ pub fn resetPlayers(
             .index = 0,
             .pos = base.clampRect(0.0, 0.0, world_size, world_size),
         };
-        weaponAssignPlayer(&players[0], WeaponId.pistol);
+        resetPlayerWeaponNative(&players[0]);
         initDefaultAltWeapon(&players[0]);
         return;
     }
@@ -150,7 +167,7 @@ pub fn resetPlayers(
             .index = @intCast(idx),
             .pos = Vec2.add(base, offset).clampRect(0.0, 0.0, world_size, world_size),
         };
-        weaponAssignPlayer(player, WeaponId.pistol);
+        resetPlayerWeaponNative(player);
         initDefaultAltWeapon(player);
     }
 }
