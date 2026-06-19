@@ -1989,12 +1989,7 @@ const App = struct {
             if (resultsUsesCompactPagedView(results, screen_width) and results.compact_page == .summary) {
                 const buttons = resultsCompactSummaryButtonsFor(results);
                 window_ui.updateSelectionFromPointer(&self.results_selection, buttons.items[0..buttons.len]);
-                if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w)) {
-                    self.results_selection = if (self.results_selection == 0) buttons.len - 1 else self.results_selection - 1;
-                }
-                if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s)) {
-                    self.results_selection = (self.results_selection + 1) % buttons.len;
-                }
+                updateResultsButtonSelection(&self.results_selection, buttons.items[0..buttons.len]);
 
                 const activated = window_ui.buttonActivated(buttons.items[0..buttons.len], self.results_selection);
                 if (!activated) return;
@@ -2036,12 +2031,7 @@ const App = struct {
             }
             const buttons = resultsButtonsFor(results);
             window_ui.updateSelectionFromPointer(&self.results_selection, buttons.items[0..buttons.len]);
-            if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w)) {
-                self.results_selection = if (self.results_selection == 0) buttons.len - 1 else self.results_selection - 1;
-            }
-            if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s)) {
-                self.results_selection = (self.results_selection + 1) % buttons.len;
-            }
+            updateResultsButtonSelection(&self.results_selection, buttons.items[0..buttons.len]);
 
             const activated = window_ui.buttonActivated(buttons.items[0..buttons.len], self.results_selection);
             if (!activated) return;
@@ -3849,6 +3839,50 @@ const ResultsButtonLabels = struct {
     len: usize,
 };
 
+const ResultsButtonNavigationAxis = enum {
+    vertical,
+    horizontal,
+};
+
+fn updateResultsButtonSelection(selection: *usize, buttons: []const UiButton) void {
+    if (buttons.len == 0) return;
+    switch (resultsButtonNavigationAxis(buttons)) {
+        .vertical => {
+            if (rl.isKeyPressed(.up) or rl.isKeyPressed(.w)) {
+                selection.* = if (selection.* == 0) buttons.len - 1 else selection.* - 1;
+            }
+            if (rl.isKeyPressed(.down) or rl.isKeyPressed(.s)) {
+                selection.* = (selection.* + 1) % buttons.len;
+            }
+        },
+        .horizontal => {
+            if (rl.isKeyPressed(.left) or rl.isKeyPressed(.a)) {
+                selection.* = if (selection.* == 0) buttons.len - 1 else selection.* - 1;
+            }
+            if (rl.isKeyPressed(.right) or rl.isKeyPressed(.d)) {
+                selection.* = (selection.* + 1) % buttons.len;
+            }
+        },
+    }
+}
+
+fn resultsButtonNavigationAxis(buttons: []const UiButton) ResultsButtonNavigationAxis {
+    if (buttons.len < 2) return .vertical;
+
+    const first_center = buttonCenter(buttons[0]);
+    const second_center = buttonCenter(buttons[1]);
+    const dx = @abs(second_center.x - first_center.x);
+    const dy = @abs(second_center.y - first_center.y);
+    return if (dx > dy) .horizontal else .vertical;
+}
+
+fn buttonCenter(button: UiButton) rl.Vector2 {
+    return .{
+        .x = button.rect.x + button.rect.width * 0.5,
+        .y = button.rect.y + button.rect.height * 0.5,
+    };
+}
+
 fn resultsButtonsFor(results: *const ResultsScreen) ResultsButtons {
     const labels = resultsButtonLabelsFor(results);
     const layout = resultsActionButtonLayoutForTimeline(results, @floatFromInt(rl.getScreenWidth()), results.timeline_ms);
@@ -5644,6 +5678,23 @@ test "result action labels match native casing" {
     try std.testing.expectEqualStrings("Play Again", quest_labels.items[1]);
     try std.testing.expectEqualStrings("High scores", quest_labels.items[2]);
     try std.testing.expectEqualStrings("Main Menu", quest_labels.items[3]);
+}
+
+test "compact results summary buttons navigate horizontally" {
+    const buttons = [_]UiButton{
+        window_ui.buttonAt("Next", 196.0, 376.0, true),
+        window_ui.buttonAt("Main Menu", 322.0, 376.0, true),
+    };
+    try std.testing.expectEqual(ResultsButtonNavigationAxis.horizontal, resultsButtonNavigationAxis(buttons[0..]));
+}
+
+test "standard results action buttons navigate vertically" {
+    const buttons = [_]UiButton{
+        window_ui.buttonAt("Play Again", 282.0, 279.0, true),
+        window_ui.buttonAt("High scores", 282.0, 311.0, true),
+        window_ui.buttonAt("Main Menu", 282.0, 343.0, true),
+    };
+    try std.testing.expectEqual(ResultsButtonNavigationAxis.vertical, resultsButtonNavigationAxis(buttons[0..]));
 }
 
 test "statistics play game action clears stacked results" {
