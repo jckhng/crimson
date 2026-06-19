@@ -8,7 +8,7 @@
   "attr": {
     "title": "Crimsonland",
     "desc": "Downstream PortMaster handheld build of the native Zig Crimsonland rewrite.",
-    "inst": "Place crimson.paq and sfx.paq in crimson/assets; music.paq is optional. Launch crimson.sh from PortMaster.",
+    "inst": "Place crimson.paq and sfx.paq in crimson/assets; music.paq or loose music/*.ogg files are optional. Launch crimson.sh from PortMaster.",
     "genres": [
       "action",
       "shooter"

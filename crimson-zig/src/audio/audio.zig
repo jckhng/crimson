@@ -40,7 +40,7 @@ const AudioArchiveAvailability = struct {
     music: bool = false,
     sfx: bool = false,
 
-    fn hasEnabledArchive(self: AudioArchiveAvailability, config: AudioConfig) bool {
+    fn hasEnabledAudio(self: AudioArchiveAvailability, config: AudioConfig) bool {
         return (config.music_enabled and self.music) or (config.sfx_enabled and self.sfx);
     }
 };
@@ -171,7 +171,7 @@ fn initAudioState(
 
 fn resolveAudioAssetsDir(allocator: std.mem.Allocator, config: AudioConfig) LoadRuntimeAudioError!?[]u8 {
     if (runtime_paths.envVarOwned(allocator, "CRIMSON_ASSETS_DIR")) |dir| {
-        if ((try audioArchiveAvailability(allocator, dir)).hasEnabledArchive(config)) return dir;
+        if ((try audioArchiveAvailability(allocator, dir)).hasEnabledAudio(config)) return dir;
         allocator.free(dir);
     } else |err| switch (err) {
         error.EnvironmentVariableMissing => {},
@@ -180,7 +180,7 @@ fn resolveAudioAssetsDir(allocator: std.mem.Allocator, config: AudioConfig) Load
 
     const runtime_dir = try runtime_paths.defaultRuntimeDir(allocator);
     if (runtime_dir) |dir| {
-        if ((try audioArchiveAvailability(allocator, dir)).hasEnabledArchive(config)) return dir;
+        if ((try audioArchiveAvailability(allocator, dir)).hasEnabledAudio(config)) return dir;
         allocator.free(dir);
     }
 
@@ -189,7 +189,7 @@ fn resolveAudioAssetsDir(allocator: std.mem.Allocator, config: AudioConfig) Load
         ".",
     };
     for (candidates) |candidate| {
-        if ((try audioArchiveAvailability(allocator, candidate)).hasEnabledArchive(config)) {
+        if ((try audioArchiveAvailability(allocator, candidate)).hasEnabledAudio(config)) {
             const owned = try allocator.dupe(u8, candidate);
             return owned;
         }
@@ -200,7 +200,8 @@ fn resolveAudioAssetsDir(allocator: std.mem.Allocator, config: AudioConfig) Load
 
 fn audioArchiveAvailability(allocator: std.mem.Allocator, dir: []const u8) LoadRuntimeAudioError!AudioArchiveAvailability {
     return .{
-        .music = try runtime_paths.archiveExistsAtDir(allocator, dir, music.music_paq_name),
+        .music = (try runtime_paths.archiveExistsAtDir(allocator, dir, music.music_paq_name)) or
+            (try music.hasLooseMusicAtDir(allocator, dir)),
         .sfx = try runtime_paths.archiveExistsAtDir(allocator, dir, sfx.sfx_paq_name),
     };
 }
@@ -253,9 +254,9 @@ test "audio archive discovery accepts sfx without music" {
     const availability = try audioArchiveAvailability(allocator, base_dir);
     try std.testing.expect(!availability.music);
     try std.testing.expect(availability.sfx);
-    try std.testing.expect(availability.hasEnabledArchive(.{}));
-    try std.testing.expect(availability.hasEnabledArchive(.{ .music_enabled = false, .sfx_enabled = true }));
-    try std.testing.expect(!availability.hasEnabledArchive(.{ .music_enabled = true, .sfx_enabled = false }));
+    try std.testing.expect(availability.hasEnabledAudio(.{}));
+    try std.testing.expect(availability.hasEnabledAudio(.{ .music_enabled = false, .sfx_enabled = true }));
+    try std.testing.expect(!availability.hasEnabledAudio(.{ .music_enabled = true, .sfx_enabled = false }));
 }
 
 test "audio archive discovery accepts music without sfx when sfx is disabled" {
@@ -275,7 +276,31 @@ test "audio archive discovery accepts music without sfx when sfx is disabled" {
     const availability = try audioArchiveAvailability(allocator, base_dir);
     try std.testing.expect(availability.music);
     try std.testing.expect(!availability.sfx);
-    try std.testing.expect(availability.hasEnabledArchive(.{}));
-    try std.testing.expect(availability.hasEnabledArchive(.{ .music_enabled = true, .sfx_enabled = false }));
-    try std.testing.expect(!availability.hasEnabledArchive(.{ .music_enabled = false, .sfx_enabled = true }));
+    try std.testing.expect(availability.hasEnabledAudio(.{}));
+    try std.testing.expect(availability.hasEnabledAudio(.{ .music_enabled = true, .sfx_enabled = false }));
+    try std.testing.expect(!availability.hasEnabledAudio(.{ .music_enabled = false, .sfx_enabled = true }));
+}
+
+test "audio discovery accepts loose gog music without music paq" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer allocator.free(base_dir);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, base_dir);
+
+    const music_dir = try std.fs.path.join(allocator, &.{ base_dir, "music" });
+    defer allocator.free(music_dir);
+    try std.Io.Dir.cwd().createDirPath(io, music_dir);
+
+    const track_path = try std.fs.path.join(allocator, &.{ music_dir, "intro.ogg" });
+    defer allocator.free(track_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = track_path, .data = "" });
+
+    const availability = try audioArchiveAvailability(allocator, base_dir);
+    try std.testing.expect(availability.music);
+    try std.testing.expect(!availability.sfx);
+    try std.testing.expect(availability.hasEnabledAudio(.{ .music_enabled = true, .sfx_enabled = false }));
 }

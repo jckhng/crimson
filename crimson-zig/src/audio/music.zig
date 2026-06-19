@@ -8,7 +8,11 @@ const music_max_dt: f32 = 0.1;
 const music_fade_in_per_sec: f32 = 1.0;
 const music_fade_out_per_sec: f32 = 0.5;
 
-pub const LoadMusicError = runtime_archive.OpenArchiveError || std.mem.Allocator.Error || std.Io.Dir.AccessError || rl.RaylibError;
+pub const LoadMusicError = runtime_archive.OpenArchiveError ||
+    std.mem.Allocator.Error ||
+    std.Io.Dir.AccessError ||
+    std.Io.Dir.ReadFileAllocError ||
+    rl.RaylibError;
 
 pub const TrackPlayback = struct {
     volume: f32 = 0.0,
@@ -219,10 +223,12 @@ pub const MusicState = struct {
     }
 
     fn loadGameTunesScript(self: *MusicState) LoadMusicError!void {
-        try self.ensureArchiveLoaded();
-        const archive = &(self.archive orelse return);
-        const script = archive.get("music/game_tunes.txt") orelse return;
+        if (try self.loadGameTunesScriptFromFile()) return;
+        if (try self.loadGameTunesScriptFromArchive()) return;
+        try self.queueDefaultGameTunes();
+    }
 
+    fn loadGameTunesScriptText(self: *MusicState, script: []const u8) LoadMusicError!void {
         var lines = std.mem.splitScalar(u8, script, '\n');
         while (lines.next()) |line_raw| {
             const line = std.mem.trim(u8, line_raw, " \t\r");
@@ -240,6 +246,38 @@ pub const MusicState = struct {
         }
     }
 
+    fn loadGameTunesScriptFromFile(self: *MusicState) LoadMusicError!bool {
+        const script_path = try std.fs.path.join(self.allocator, &.{ self.assets_dir, "music/game_tunes.txt" });
+        defer self.allocator.free(script_path);
+
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const script = std.Io.Dir.cwd().readFileAlloc(io, script_path, self.allocator, .unlimited) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer self.allocator.free(script);
+
+        try self.loadGameTunesScriptText(script);
+        return true;
+    }
+
+    fn loadGameTunesScriptFromArchive(self: *MusicState) LoadMusicError!bool {
+        self.ensureArchiveLoaded() catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        const archive = &(self.archive orelse return false);
+        const script = archive.get("music/game_tunes.txt") orelse return false;
+        try self.loadGameTunesScriptText(script);
+        return true;
+    }
+
+    fn queueDefaultGameTunes(self: *MusicState) LoadMusicError!void {
+        for (default_game_tunes) |track_key| {
+            try self.queueTrack(track_key);
+        }
+    }
+
     fn loadMusicStreamForPath(self: *MusicState, rel_path: []const u8) LoadMusicError!?rl.Music {
         const normalized = try normalizeArchivePathOwned(self.allocator, rel_path);
         defer self.allocator.free(normalized);
@@ -248,21 +286,29 @@ pub const MusicState = struct {
         defer self.allocator.free(full_path);
 
         const io = std.Io.Threaded.global_single_threaded.io();
-        if (std.Io.Dir.cwd().access(io, full_path, .{})) {
-            const path_z = try self.allocator.dupeZ(u8, full_path);
-            defer self.allocator.free(path_z);
-            const stream = try rl.loadMusicStream(path_z);
-            return stream;
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        }
+        if (try self.loadMusicStreamFromFileIfPresent(io, full_path)) |stream| return stream;
+
+        const basename_path = try std.fs.path.join(self.allocator, &.{ self.assets_dir, std.fs.path.basename(normalized) });
+        defer self.allocator.free(basename_path);
+        if (try self.loadMusicStreamFromFileIfPresent(io, basename_path)) |stream| return stream;
 
         try self.ensureArchiveLoaded();
         const archive = &(self.archive orelse return null);
         const payload = archive.get(normalized) orelse archive.get(std.fs.path.basename(normalized)) orelse return null;
         const stream = try rl.loadMusicStreamFromMemory(".ogg", payload);
         return stream;
+    }
+
+    fn loadMusicStreamFromFileIfPresent(self: *MusicState, io: std.Io, path: []const u8) LoadMusicError!?rl.Music {
+        if (std.Io.Dir.cwd().access(io, path, .{})) {
+            const path_z = try self.allocator.dupeZ(u8, path);
+            defer self.allocator.free(path_z);
+            const stream = try rl.loadMusicStream(path_z);
+            return stream;
+        } else |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        }
     }
 
     fn ensureArchiveLoaded(self: *MusicState) LoadMusicError!void {
@@ -291,6 +337,36 @@ const core_tracks = [_]struct {
     .{ .rel_path = "music/gt2_harppen.ogg" },
 };
 
+const default_game_tunes = [_][]const u8{
+    "gt1_ingame",
+    "gt2_harppen",
+};
+
+pub fn hasLooseMusicAtDir(allocator: std.mem.Allocator, dir_path: []const u8) (std.mem.Allocator.Error || std.Io.Dir.AccessError)!bool {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    for (core_tracks) |track| {
+        const normalized = try normalizeArchivePathOwned(allocator, track.rel_path);
+        defer allocator.free(normalized);
+
+        const music_path = try std.fs.path.join(allocator, &.{ dir_path, normalized });
+        defer allocator.free(music_path);
+        if (try pathExists(io, music_path)) return true;
+
+        const basename_path = try std.fs.path.join(allocator, &.{ dir_path, std.fs.path.basename(normalized) });
+        defer allocator.free(basename_path);
+        if (try pathExists(io, basename_path)) return true;
+    }
+    return false;
+}
+
+fn pathExists(io: std.Io, path: []const u8) std.Io.Dir.AccessError!bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
 fn clampVolume(volume: f32) f32 {
     return std.math.clamp(volume, @as(f32, 0.0), @as(f32, 1.0));
 }
@@ -317,4 +393,42 @@ test "track key normalization strips suffix from basename" {
     const key = try normalizeTrackKeyOwned(allocator, "music\\gt1_ingame.ogg");
     defer allocator.free(key);
     try std.testing.expectEqualStrings("gt1_ingame", key);
+}
+
+test "loose music discovery accepts gog music directory" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer allocator.free(base_dir);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, base_dir);
+
+    const music_dir = try std.fs.path.join(allocator, &.{ base_dir, "music" });
+    defer allocator.free(music_dir);
+    try std.Io.Dir.cwd().createDirPath(io, music_dir);
+
+    const track_path = try std.fs.path.join(allocator, &.{ music_dir, "gt1_ingame.ogg" });
+    defer allocator.free(track_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = track_path, .data = "" });
+
+    try std.testing.expect(try hasLooseMusicAtDir(allocator, base_dir));
+}
+
+test "loose music discovery accepts flat gog music files" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_dir = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer allocator.free(base_dir);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, base_dir);
+
+    const track_path = try std.fs.path.join(allocator, &.{ base_dir, "gt2_harppen.ogg" });
+    defer allocator.free(track_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = track_path, .data = "" });
+
+    try std.testing.expect(try hasLooseMusicAtDir(allocator, base_dir));
 }
