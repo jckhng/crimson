@@ -97,7 +97,8 @@ if [[ -n "$LIB_DIR" ]]; then
         echo "Library directory not found: $LIB_DIR" >&2
         exit 1
     fi
-    find "$LIB_DIR" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} "$STAGE_DIR/crimson/lib/" \;
+    mkdir -p "$STAGE_DIR/crimson/libs.aarch64"
+    find "$LIB_DIR" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} "$STAGE_DIR/crimson/libs.aarch64/" \;
 fi
 
 if [[ -n "$ASSETS_DIR" ]]; then
@@ -105,14 +106,21 @@ if [[ -n "$ASSETS_DIR" ]]; then
         echo "Asset directory not found: $ASSETS_DIR" >&2
         exit 1
     fi
-    for archive in crimson.paq music.paq sfx.paq; do
+    for archive in crimson.paq sfx.paq; do
         if [[ ! -f "$ASSETS_DIR/$archive" ]]; then
             echo "Missing required archive: $ASSETS_DIR/$archive" >&2
             exit 1
         fi
         cp -a "$ASSETS_DIR/$archive" "$STAGE_DIR/crimson/assets/"
     done
+    if [[ -f "$ASSETS_DIR/music.paq" ]]; then
+        cp -a "$ASSETS_DIR/music.paq" "$STAGE_DIR/crimson/assets/"
+    elif [[ -d "$ASSETS_DIR/music" ]]; then
+        cp -a "$ASSETS_DIR/music" "$STAGE_DIR/crimson/assets/"
+    fi
 fi
+
+find "$STAGE_DIR" -name '.gitkeep' -type f -delete
 
 (
     cd "$STAGE_DIR"
